@@ -25,7 +25,7 @@
 #include <ctime>            // time (semente do aleatorio)
 
 #ifndef M_PI
-#define M_PI 3.14159265358979323846   // valor de PI (alguns compiladores nao tem)
+#define M_PI 3.1415   // valor de PI
 #endif
 
 
@@ -212,52 +212,10 @@ void desenhaAreia() {
     desenhaCoral(680, 72, 0.85f, 0.4f, 0.1f);
 }
 
-// Uma bolha que cresce conforme sobe.
-void desenhaBolha(float x, float y, float r) {
-    glPushMatrix();
-    glTranslatef(x, y, 0.0f);
-    glScalef(r, r, 1.0f);   // ESCALA: a bolha cresce conforme sobe
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    glColor4f(0.72f, 0.90f, 1.0f, 0.30f);
-    circulo(0, 0, 1.0f);
-
-    glColor4f(0.88f, 0.96f, 1.0f, 0.70f);
-    glBegin(GL_LINE_LOOP);
-    for (int i = 0; i < 32; i++) {
-        float a = 2.0f * M_PI * i / 32;
-        glVertex2f(cosf(a), sinf(a));
-    }
-    glEnd();
-
-    glColor4f(1, 1, 1, 0.80f);
-    circulo(-0.32f, 0.38f, 0.20f);
-    glDisable(GL_BLEND);
-    glPopMatrix();
-}
-
-// Listas de bolhas (posicoes fixas no cenario).
-struct Bolha { float x, baseY, vel, wobble, tamanho; };
-Bolha bolhas[] = {
-    { 110, 10, 30, 0.0f, 6 }, { 240, 40, 38, 1.2f, 4 },
-    { 390, 20, 25, 0.8f, 8 }, { 550, 60, 33, 2.1f, 5 },
-    { 700, 10, 28, 1.5f, 7 }, { 180, 50, 42, 3.0f, 3 },
-    { 500, 30, 35, 0.4f, 6 }, { 820, 15, 29, 1.8f, 4 },
-};
-
 // Desenha o cenario inteiro, de tras para a frente.
 void desenhaCenario() {
     desenhaFundo();
     desenhaAreia();
-
-    for (Bolha& b : bolhas) {
-        float y = fmodf(b.baseY + b.vel * T, H + 20.0f);
-        float x = b.x + 9.0f * sinf(T * 1.4f + b.wobble);
-        float esc = b.tamanho * (0.4f + 0.6f * y / H);
-        desenhaBolha(x, y, esc);
-    }
 }
 
 /* ===========================================================================
