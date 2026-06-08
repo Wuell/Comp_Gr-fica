@@ -140,18 +140,6 @@ void desenhaPeixe(float x, float y, float escala,
         glColor3f(1, 1, 1);             circulo(19, 6, 1.0f);
     }
 
-    // Boca (para deteccao de colisao)
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); 
-    glColor4f(0.0f, 0.0f, 0.0f, 0.0f); // fica invisivel
-    glBegin(GL_LINE_STRIP);
-    for (int i = 0; i <= 8; i++) {
-        float a = -M_PI / 5.0f + M_PI / 2.5f * i / 8.0f;
-        glVertex2f(30 + 4 * cosf(a), -1 + 4 * sinf(a));
-    }
-    glEnd();
-    glDisable(GL_BLEND);
-
     glPopMatrix();   // restaura as coordenadas (nao afeta os outros desenhos)
 }
 
@@ -423,8 +411,7 @@ void desenhaTelaFim() {
     }
 
     glColor3f(0.80f, 0.90f, 1.0f);
-    textoCentralizado(H * 0.5f - 40,
-        "Pressione R para jogar de novo  ou  ESC para sair",
+    textoCentralizado(H * 0.5f - 40, "Pressione R para jogar de novo  ou  ESC para sair",
         GLUT_BITMAP_HELVETICA_18);
 }
 
