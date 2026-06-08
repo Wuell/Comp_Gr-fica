@@ -168,9 +168,9 @@ void desenhaRocha(float x, float y, float w, float h) {
 // Um coral (varias elipses em volta de um centro).
 void desenhaCoral(float x, float y, float r, float rg, float rb) {
     glColor3f(r, rg, rb);
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 3; i++) {
         float a = 2.0f * M_PI * i / 6;
-        elipse(x + 12 * cosf(a), y + 12 * sinf(a), 7, 12);
+        elipse(x + 3 * (i - 1), y, 4, 10);
     }
     circulo(x, y, 8);
 }
