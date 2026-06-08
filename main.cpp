@@ -52,7 +52,7 @@ void elipse(float cx, float cy, float rx, float ry, int n = 40) {
     glBegin(GL_TRIANGLE_FAN);
     glVertex2f(cx, cy);                                     // centro
     for (int i = 0; i <= n; i++) {
-        float a = 2.0f * M_PI * i / n;                     // angulo (volta inteira)
+        float a = 2 * M_PI * i / n;                     // angulo (volta inteira)
         glVertex2f(cx + rx * cosf(a), cy + ry * sinf(a));  // ponto na borda
     }
     glEnd();
@@ -140,14 +140,17 @@ void desenhaPeixe(float x, float y, float escala,
         glColor3f(1, 1, 1);             circulo(19, 6, 1.0f);
     }
 
-    // Boca
-    glColor3f(r * 0.5f, 0.05f, 0.05f);
+    // Boca (para deteccao de colisao)
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); 
+    glColor4f(0.0f, 0.0f, 0.0f, 0.0f); // fica invisivel
     glBegin(GL_LINE_STRIP);
     for (int i = 0; i <= 8; i++) {
         float a = -M_PI / 5.0f + M_PI / 2.5f * i / 8.0f;
         glVertex2f(30 + 4 * cosf(a), -1 + 4 * sinf(a));
     }
     glEnd();
+    glDisable(GL_BLEND);
 
     glPopMatrix();   // restaura as coordenadas (nao afeta os outros desenhos)
 }
@@ -222,7 +225,7 @@ void desenhaCenario() {
  *  4) JOGO  -  regras (jogador, peixes, colisoes, vitoria / derrota)
  * ======================================================================== */
 
-// Qual seta esta apertada agora
+ // Qual seta esta apertada agora
 bool kLeft = false, kRight = false, kUp = false, kDown = false;
 
 // Catalogo dos peixes: cada um tem so um TAMANHO e uma COR.
@@ -500,7 +503,7 @@ int main(int argc, char** argv) {
     jogoInicia();
 
     glutInit(&argc, argv);
-    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB);   // buffer duplo (animacao suave)
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA);   // buffer duplo (animacao suave)
     glutInitWindowSize(W, H);
     glutCreateWindow("Peixe Faminto - Computacao Grafica");
 
