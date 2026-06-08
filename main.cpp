@@ -165,32 +165,28 @@ void desenhaRocha(float x, float y, float w, float h) {
     glEnd();
 }
 
-// Um coral (varias elipses em volta de um centro).
+// Um coral.
 void desenhaCoral(float x, float y, float r, float rg, float rb) {
     glColor3f(r, rg, rb);
-    elipse(x - 3, y, 3, 12);
-    elipse(x + 3, y, 3, 12);
-    circulo(x, y, 8);
+    elipse(x - 7, y, 10, 26);
+    elipse(x + 7, y, 10, 26);
+    circulo(x, y, 20);
 }
 
 // Areia do fundo + dunas + rochas + corais.
 void desenhaAreia() {
+
+    // dunas de areia.
+    glColor3f(0.86f, 0.79f, 0.57f);
+    float dx[] = { 60, 240, 420, 600, 790 }; // posicao topo das dunas.
+    for (float x : dx) {
+        elipse(x, 72, 185, 49);
+    }
+
     glColor3f(0.78f, 0.71f, 0.48f);
     glBegin(GL_QUADS);
     glVertex2f(0, 0); glVertex2f(W, 0); glVertex2f(W, 72); glVertex2f(0, 72);
     glEnd();
-
-    glColor3f(0.86f, 0.79f, 0.57f);
-    float dx[] = { 60, 240, 420, 600, 790 };
-    for (float x : dx) {
-        glBegin(GL_TRIANGLE_FAN);
-        glVertex2f(x, 72);
-        for (int i = 0; i <= 32; i++) {
-            float a = M_PI * i / 32;
-            glVertex2f(x + 95 * cosf(a), 72 + 24 * sinf(a));
-        }
-        glEnd();
-    }
 
     glColor3f(0.36f, 0.36f, 0.40f);
     desenhaRocha(155, 60, 52, 42);
