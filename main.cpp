@@ -222,15 +222,6 @@ void desenhaCenario() {
  *  4) JOGO  -  regras (jogador, peixes, colisoes, vitoria / derrota)
  * ======================================================================== */
 
- // Estado do peixe do jogador
-float px = W * 0.5f, py = H * 0.5f;   // posicao (comeca no meio da tela)
-float pvx = 0.0f, pvy = 0.0f;          // velocidade
-float pesc = 0.5f;                     // tamanho (comeca pequeno e cresce)
-bool  facingRight = true;              // virado para a direita?
-int   comidos = 0;                     // quantos peixes ja comeu
-bool  fimDeJogo = false;
-bool  venceu = false;
-
 // Qual seta esta apertada agora
 bool kLeft = false, kRight = false, kUp = false, kDown = false;
 
@@ -266,6 +257,14 @@ int   vivos = N_PEIXES;   // quantos ainda estao vivos
 float aleatorio(float a, float b) {
     return a + (b - a) * (rand() / (float)RAND_MAX);
 }
+
+// Estado do peixe do jogador (os valores iniciais ficam em jogoReinicia)
+float px, py;            // posicao
+float pvx, pvy;          // velocidade
+float pesc;              // tamanho
+bool  facingRight;       // virado para a direita?
+int   comidos;           // quantos peixes ja comeu
+bool  fimDeJogo, venceu; // estados de fim de jogo
 
 // (Re)comeca a partida: zera o jogador e re-sorteia todos os peixes.
 void jogoReinicia() {
