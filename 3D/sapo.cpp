@@ -9,11 +9,12 @@
 //      ./sapo
 //
 //  CONTROLES:
+//      MENU: digite o NOME e tecle ENTER para jogar
 //      Seta ESQUERDA / DIREITA  -> troca de pista
 //      Seta CIMA  ou  ESPACO    -> pula (passa por cima de obstaculo baixo)
 //      Seta BAIXO ou  S         -> rola/abaixa (passa por baixo do obstaculo alto)
-//      R                        -> reinicia apos game over
-//      ESC ou Q                 -> sai
+//      Coma MOSCAS para nao zerar a barra de FOME (senao: game over)
+//      ENTER (no game over)     -> volta ao menu   |   ESC -> menu   |   Q -> sai
 //
 //  MAPA DOS REQUISITOS DO PROJETO (procure pelas tags [REQ:...] no codigo):
 //      [REQ:MODELAGEM]   modelagem geometrica dos objetos 3D
@@ -35,7 +36,8 @@
 #include <vector>
 #include <string>
 #include <map>
-#include <algorithm>   // std::sort (recorte dos vaos no deck)
+#include <algorithm>   // std::sort (recorte dos vaos no deck / placar)
+#include <cctype>      // toupper (entrada de nome no menu)
 
 // ----------------------------------------------------------------------------
 //  CONSTANTES DO MUNDO
@@ -72,9 +74,22 @@ float lingua      = 0.0f;    // 0..1 -> quanto a lingua esta esticada (ao comer)
 float velocidade  = 14.0f;   // velocidade que o mundo vem em nossa direcao
 float distancia   = 0.0f;    // metros percorridos (rola a textura do piso)
 int   pontos      = 0;       // moscas comidas
-bool  gameover    = false;
 float tempo       = 0.0f;    // relogio global (segundos) para animacoes
 int   larguraTela = 1000, alturaTela = 700;
+
+// ---- MAQUINA DE ESTADOS: menu -> jogando -> game over ----
+enum EstadoJogo { MENU, JOGANDO, GAMEOVER };
+EstadoJogo estado = MENU;
+std::string nomeJogador = "";          // digitado no menu
+
+// ---- BARRA DE FOME: cai com o tempo; comer mosca reenche; zerou = fim ----
+float fome = 1.0f;                                  // 0..1
+static const float FOME_TAXA  = 1.0f / 26.0f;       // esvazia em ~26s sem comer
+static const float FOME_GANHO = 0.10f;              // cada mosca reenche 10%
+
+// ---- PLACAR (salvo em placar.txt) ----
+struct Score { std::string nome; int moscas; int dist; int pts; };
+std::vector<Score> placar;
 
 // ----------------------------------------------------------------------------
 //  OBSTACULOS e MOSCAS  (listas que crescem/reciclam -> mundo infinito)
@@ -97,23 +112,20 @@ float distProxLinha = 0.0f;      // distancia (m) em que a proxima linha sera cr
 GLuint texMadeira, texAgua, texCaixa, texGrama;
 GLuint texBranca = 0;         // textura 1x1 branca (p/ objetos SEM textura no shader)
 
-// ---- SHADERS (toon / contorno / agua) ----
-GLuint progToon = 0, progOutline = 0, progAgua = 0;
-bool   shadersOK  = false;    // false -> cai no pipeline antigo (fallback seguro)
+// ---- SHADERS (objetos + agua) ----
+GLuint progToon = 0, progAgua = 0;
+bool   shadersOK  = false;    // false -> cai no pipeline classico (fallback seguro)
 bool   usarShader = true;     // tecla T liga/desliga
 
-// DISPLAY LIST da esfera unitaria: o glutSolidSphere recalcula seno/cosseno a
-// cada chamada. Como o sapo + sombra + moscas desenham ~20 esferas por quadro,
-// compilamos UMA vez a malha e so reusamos -> ganho grande de desempenho.
+// Esfera unitaria compilada UMA vez (reusada por sapo/sombra/moscas -> rapido).
 GLuint listaEsfera = 0;
 GLuint listaEsferaLo = 0;   // esfera de BAIXA resolucao p/ pecas pequenas (mosca)
 
-// DISPLAY LIST do CORPO do sapo: uma malha unica e lisa (ver secao 4). Pode vir
-// de um arquivo .obj (modelo profissional) OU ser gerada por marching tetrahedra.
+// Display list do corpo do sapo (do sapo.obj, ou do fallback se faltar).
 GLuint listaSapo = 0;
 bool   sapoDeOBJ = false;    // true se carregou de sapo.obj (senao, malha gerada)
 GLuint listaMosca = 0;       // modelo .obj da mosca (opcional)
-bool   moscaDeOBJ = false;   // true se carregou mosca.obj (senao, mosca procedural)
+bool   moscaDeOBJ = false;   // true se carregou moscas.obj (senao, mosca procedural)
 
 // AJUSTES do modelo do SAPO importado (mexa aqui se ele nascer torto/afundado):
 static const float SAPO_OBJ_GIRA_Y = -90.0f; // graus em Y p/ alinhar a "frente"
@@ -125,7 +137,8 @@ static const float SAPO_OBJ_TAM    =  1.7f;  // tamanho no maior eixo
 // carregaOBJ agora e GENERICO: le qualquer .obj e RETORNA uma display list
 // (0 = falhou). Parametros orientam/escalam o modelo (sapo, mosca, etc.).
 GLuint carregaOBJ(const char* caminho, float giraY, float piso, float tam);
-void geraMalhaSapo();                    // gerador por metaballs (secao 4b)
+void geraMalhaSapo();                    // fallback do sapo (se sapo.obj faltar)
+void geraLinha(float z);                 // spawn de obstaculos/moscas
 
 // ============================================================================
 //  1) TEXTURAS PROCEDURAIS
@@ -227,11 +240,8 @@ void criaTexturas() {
 }
 
 // ============================================================================
-//  1b) SHADERS GLSL (estilo CARTOON: toon shading + contorno + agua)  [ALEM DO PDF]
-//     Usamos GLSL 1.20 em perfil de compatibilidade: os shaders leem o que o
-//     pipeline fixo ja envia (gl_Normal, gl_Color, gl_LightSource[0], texturas,
-//     matrizes) -> nao precisamos reescrever NENHUM desenho. Se algo falhar,
-//     shadersOK=false e o jogo roda no modo antigo (fallback).
+//  1b) SHADERS GLSL 1.20 (sombreado flat dos objetos + agua). Leem o que o
+//      pipeline fixo ja envia; se falharem, shadersOK=false e roda no modo classico.
 // ============================================================================
 
 // --- VERTEX comum (toon/agua de objetos): passa normal, posicao-olho, cor, uv
@@ -267,31 +277,19 @@ static const char* FS_TOON =
 "  gl_FragColor = vec4(col, gl_Color.a);\n"
 "}\n";
 
-// --- CONTORNO: infla o vertice ao longo da normal e pinta de preto (silhueta)
-static const char* VS_OUT =
-"#version 120\n"
-"uniform float larg;\n"
-"void main(){\n"
-"  vec4 p = gl_Vertex; p.xyz += normalize(gl_Normal) * larg;\n"
-"  gl_Position = gl_ModelViewProjectionMatrix * p;\n"
-"}\n";
-static const char* FS_OUT =
-"#version 120\n"
-"void main(){ gl_FragColor = vec4(0.05,0.06,0.06,1.0); }\n";
 
-// --- AGUA: onda animada no vertice + agua cartoon com brilho no fragment
+// --- AGUA: uma onda desloca o vertice e gera a normal analitica (relevo) ---
 static const char* VS_AGUA =
 "#version 120\n"
 "uniform float tempo;\n"
 "varying vec3 N; varying vec3 P; varying float H; varying float WX;\n"
 "void main(){\n"
 "  vec4 v = gl_Vertex;\n"
-"  float w = sin(v.x*0.6 + tempo*1.5)*0.08 + cos(v.z*0.5 + tempo*1.1)*0.08;\n"
+"  float a=0.12, k=0.40;\n"
+"  float w = a*sin(v.x*k + v.z*0.5 + tempo*1.4);\n"
 "  v.y += w; H = w; WX = v.x;\n"
-"  float dx =  0.6*cos(v.x*0.6 + tempo*1.5)*0.08;\n"
-"  float dz = -0.5*sin(v.z*0.5 + tempo*1.1)*0.08;\n"
-"  vec3 nn = normalize(vec3(-dx, 1.0, -dz));\n"
-"  N = gl_NormalMatrix * nn;\n"
+"  float dwdx = a*k*cos(v.x*k + v.z*0.5 + tempo*1.4);\n"
+"  N = gl_NormalMatrix * normalize(vec3(-dwdx, 1.0, -dwdx*0.8));\n"
 "  P = vec3(gl_ModelViewMatrix * v);\n"
 "  gl_Position = gl_ModelViewProjectionMatrix * v;\n"
 "}\n";
@@ -304,16 +302,18 @@ static const char* FS_AGUA =
 "  vec3 L = normalize(gl_LightSource[0].position.xyz - P);\n"
 "  vec3 V = normalize(-P);\n"
 "  vec3 Hh = normalize(L+V);\n"
-"  float sp = pow(max(dot(n,Hh),0.0), 80.0);\n"
-"  vec3 deep    = vec3(0.04,0.19,0.28);\n"                  // agua funda: petroleo
-"  vec3 shallow = vec3(0.10,0.42,0.50);\n"                  // crista: turquesa
-"  vec3 col = mix(deep, shallow, clamp(H*3.0+0.5, 0.0, 1.0));\n"
+"  float sp = pow(max(dot(n,Hh),0.0), 60.0);\n"
+"  float h = clamp(H*3.2 + 0.5, 0.0, 1.0);\n"          // cava escura -> crista clara
+"  vec3 fundo  = vec3(0.03,0.15,0.23);\n"                   // cava: petroleo fundo
+"  vec3 crista = vec3(0.13,0.44,0.52);\n"                   // crista: turquesa
+"  vec3 col = mix(fundo, crista, h);\n"
+"  float foam = smoothstep(0.07, 0.11, H);\n"              // espuma nas cristas
+"  col = mix(col, vec3(0.80,0.92,0.95), foam*0.4);\n"
+"  col += sp * vec3(1.0,0.92,0.72);\n"                      // brilho do sol
 "  float dist = -P.z;\n"
-   // REFLEXO DO SOL: agua ganha brilho dourado cintilante perto do horizonte
-"  float horiz = clamp((dist-30.0)/40.0, 0.0, 1.0);\n"
+"  float horiz = clamp((dist-30.0)/40.0, 0.0, 1.0);\n"     // reflexo dourado no horizonte
 "  float shim = 0.5 + 0.5*sin(WX*2.5 + dist*0.6 - tempo*3.0);\n"
-"  col += vec3(1.0,0.72,0.40) * horiz*horiz * 0.55 * shim;\n"
-"  if (sp > 0.55) col += vec3(1.0,0.90,0.70);\n"            // faisca especular quente
+"  col += vec3(1.0,0.72,0.40) * horiz*horiz * 0.4 * shim;\n"
 "  float f = clamp((fogEnd - dist)/(fogEnd - fogStart), 0.0, 1.0);\n"
 "  col = mix(fogColor, col, f);\n"
 "  gl_FragColor = vec4(col, 1.0);\n"
@@ -345,17 +345,13 @@ GLuint linkaPrograma(const char* vs, const char* fs, const char* nome) {
     return p;
 }
 void initShaders() {
-    progToon    = linkaPrograma(VS_TOON, FS_TOON, "toon");
-    progOutline = linkaPrograma(VS_OUT,  FS_OUT,  "contorno");
-    progAgua    = linkaPrograma(VS_AGUA, FS_AGUA, "agua");
-    shadersOK = (progToon && progOutline && progAgua);
+    progToon = linkaPrograma(VS_TOON, FS_TOON, "toon");
+    progAgua = linkaPrograma(VS_AGUA, FS_AGUA, "agua");
+    shadersOK = (progToon && progAgua);
     if (shadersOK) {
         glUseProgram(progToon);
         glUniform1i(glGetUniformLocation(progToon, "tex"), 0);  // sampler na unidade 0
         glUseProgram(0);
-        printf("Shaders CARTOON ativos (tecla T liga/desliga).\n");
-    } else {
-        printf("Shaders indisponiveis -> rodando no modo classico.\n");
     }
 }
 
@@ -451,20 +447,13 @@ void initGL() {
       glutSolidSphere(1.0, 10, 8);      // poucos poligonos -> barato p/ a mosca
     glEndList();
 
-    // Corpo do sapo: tenta um modelo .obj externo; se nao houver, gera a malha
-    // lisa por metaballs. Nos dois casos vira UMA display list (listaSapo).
+    // Sapo: modelo sapo.obj (ou fallback simples se faltar). Mosca: moscas.obj.
     listaSapo = carregaOBJ("sapo.obj", SAPO_OBJ_GIRA_Y, SAPO_OBJ_PISO, SAPO_OBJ_TAM);
-    if (listaSapo) { sapoDeOBJ = true; printf("Sapo: modelo sapo.obj carregado.\n"); }
-    else           { geraMalhaSapo(); printf("Sapo: malha gerada por metaballs (sem sapo.obj).\n"); }
-
-    // Mosca: se existir mosca.obj na pasta, usa o modelo; senao, a mosca procedural.
-    // (giraY=0, base no y=0, tamanho pequeno ~0.35 no maior eixo)
-    listaMosca = carregaOBJ("mosca.obj", 0.0f, 0.0f, 0.35f);
+    if (listaSapo) sapoDeOBJ = true; else geraMalhaSapo();
+    listaMosca = carregaOBJ("moscas.obj", 0.0f, -0.18f, 0.36f);
     moscaDeOBJ = (listaMosca != 0);
-    printf(moscaDeOBJ ? "Mosca: modelo mosca.obj carregado.\n"
-                      : "Mosca: procedural (sem mosca.obj).\n");
 
-    initShaders();               // compila os shaders cartoon (ALEM do PDF)
+    initShaders();
     srand((unsigned)time(NULL));
 }
 
@@ -544,35 +533,17 @@ void blobLo(float x, float y, float z, float sx, float sy, float sz, float r) {
 }
 
 // ----------------------------------------------------------------------------
-//  Utilitarios de vetor (usados pelo loader e pelo gerador de malha)
+//  Utilitarios de vetor (usados pelo loader de .obj)
 // ----------------------------------------------------------------------------
 struct Vec3 { float x, y, z; };
 static Vec3 vsub(Vec3 a, Vec3 b){ return { a.x-b.x, a.y-b.y, a.z-b.z }; }
 static Vec3 vcross(Vec3 a, Vec3 b){ return { a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x }; }
 static Vec3 vnorm(Vec3 v){ float m=sqrtf(v.x*v.x+v.y*v.y+v.z*v.z); if(m<1e-9f)m=1; return {v.x/m,v.y/m,v.z/m}; }
-static float clampf(float v,float a,float b){ return v<a?a:(v>b?b:v); }
-
-// Cor do sapo em funcao da ALTURA (y) do vertice: barriga creme embaixo ->
-// verde no corpo -> verde escuro no alto do dorso. Da o padrao de sapo de graca.
-static Vec3 corSapoPorAltura(float y){
-    float t1 = clampf((y + 0.28f) / 0.34f, 0, 1);   // creme -> verde
-    float t2 = clampf((y - 0.14f) / 0.30f, 0, 1);   // verde -> escuro
-    Vec3 a = { CREME_SAPO[0] + (VERDE_SAPO[0]-CREME_SAPO[0])*t1,
-               CREME_SAPO[1] + (VERDE_SAPO[1]-CREME_SAPO[1])*t1,
-               CREME_SAPO[2] + (VERDE_SAPO[2]-CREME_SAPO[2])*t1 };
-    return { a.x + (VERDE_ESCURO[0]-a.x)*t2,
-             a.y + (VERDE_ESCURO[1]-a.y)*t2,
-             a.z + (VERDE_ESCURO[2]-a.z)*t2 };
-}
 
 // ============================================================================
-//  4a) LOADER DE .OBJ (+ .mtl)  -  modelo poligonal externo, sem bibliotecas
-//     Le v / vn / f (triangula faces de N lados; aceita v, v/vt, v//vn,
-//     v/vt/vn e indices negativos). Le as CORES do .mtl (Kd por material) e
-//     pinta cada face pela cor do seu 'usemtl' -> traz olhos, boca etc. do
-//     modelo. Normaliza orientacao (gira em Y), centraliza em X/Z, apoia no
-//     chao e escala. Compila tudo em listaSapo.
-//     -> Baixe um sapo .obj (Poly Pizza etc.), salve como "sapo.obj" na pasta.
+//  4a) LOADER DE .OBJ (+ .mtl)  -  modelo poligonal externo, sem bibliotecas.
+//      Le v/vn/f (triangula faces), pega a cor Kd de cada material, normaliza
+//      orientacao/escala e compila numa display list.
 // ============================================================================
 
 static Vec3 rotYv(Vec3 p, float deg){
@@ -680,123 +651,17 @@ GLuint carregaOBJ(const char* caminho, float giraY, float piso, float tam) {
     return lista;
 }
 
-// ============================================================================
-//  4b) GERADOR DE MALHA POR METABALLS + MARCHING TETRAHEDRA  [REQ:MODELAGEM]
-//     Ideia: em vez de EMPILHAR esferas (que ficam com "bolhas" e emendas),
-//     descrevemos o sapo como uma FUNCAO no espaco (distancia com sinal, SDF) a
-//     um conjunto de primitivas (corpo, cabeca, pernas dobradas, olhos) UNIDAS
-//     por "smooth min" -> elas se FUNDEM suavemente. Depois "poligonizamos" a
-//     superficie onde a funcao vale 0, gerando UMA malha continua e lisa.
-//     As normais saem do gradiente da funcao -> sombreado suave de verdade.
-// ============================================================================
-static float smin(float a, float b, float k){          // uniao suave (min arredondado)
-    float h = fmaxf(k - fabsf(a-b), 0.0f) / k;
-    return fminf(a, b) - h*h*k*0.25f;
-}
-static float sdEllip(float x,float y,float z, float cx,float cy,float cz,
-                     float rx,float ry,float rz){       // elipsoide (aprox. de SDF)
-    float dx=x-cx, dy=y-cy, dz=z-cz;
-    float k0=sqrtf((dx*dx)/(rx*rx)+(dy*dy)/(ry*ry)+(dz*dz)/(rz*rz));
-    float k1=sqrtf((dx*dx)/(rx*rx*rx*rx)+(dy*dy)/(ry*ry*ry*ry)+(dz*dz)/(rz*rz*rz*rz));
-    return k1>1e-8f ? k0*(k0-1.0f)/k1 : k0-1.0f;
-}
-static float sdCap(float x,float y,float z, float ax,float ay,float az,
-                   float bx,float by,float bz, float r){ // capsula (segmento A-B)
-    float pax=x-ax, pay=y-ay, paz=z-az, bax=bx-ax, bay=by-ay, baz=bz-az;
-    float h=clampf((pax*bax+pay*bay+paz*baz)/(bax*bax+bay*bay+baz*baz+1e-9f), 0, 1);
-    float dx=pax-bax*h, dy=pay-bay*h, dz=paz-baz*h;
-    return sqrtf(dx*dx+dy*dy+dz*dz)-r;
-}
-
-// A FORMA DO SAPO (model space: cabeca em +Z; visto de tras -> -Z pra camera).
-static float mapaSapo(float x, float y, float z){
-    float d = sdEllip(x,y,z,  0.0f, 0.02f,-0.03f,  0.60f,0.40f,0.66f);          // tronco largo/achatado
-    d = smin(d, sdEllip(x,y,z, 0.0f, 0.10f,-0.50f, 0.45f,0.42f,0.40f), 0.12f);  // bumbum (traseira)
-    d = smin(d, sdEllip(x,y,z, 0.0f, 0.07f, 0.56f, 0.44f,0.39f,0.42f), 0.14f);  // cabeca (frente)
-    for (int s=-1; s<=1; s+=2) {
-        float S=(float)s;
-        d = smin(d, sdCap(x,y,z, 0.26f*S,0.06f,-0.14f, 0.50f*S, 0.28f, 0.04f, 0.17f), 0.08f); // coxa
-        d = smin(d, sdCap(x,y,z, 0.50f*S,0.28f, 0.04f, 0.40f*S,-0.20f, 0.32f, 0.11f), 0.06f); // canela
-        d = smin(d, sdCap(x,y,z, 0.40f*S,-0.22f,0.30f, 0.34f*S,-0.32f, 0.74f, 0.09f), 0.05f); // pe palmado
-        d = smin(d, sdCap(x,y,z, 0.25f*S,-0.02f,0.46f, 0.30f*S,-0.30f, 0.64f, 0.07f), 0.05f); // bracinho
-        d = smin(d, sdEllip(x,y,z, 0.28f*S,0.30f,0.54f, 0.18f,0.19f,0.18f), 0.05f);           // globo do olho
-    }
-    return d;
-}
-
-// Marching tetrahedra: cada celula do grid vira 6 tetraedros; cada tetraedro
-// corta a superficie em 0, 1 ou 2 triangulos. Tabelas pequenas (por isso
-// "tetrahedra" e nao "cubes": menos codigo).
-void geraMalhaSapo(){
-    // Decomposicao de um cubo (cantos 0..7) em 6 tetraedros que compartilham a
-    // diagonal 0-7; arestas locais de um tetraedro; e os triangulos por caso.
-    static const int TETS[6][4] = {{0,7,1,3},{0,7,3,2},{0,7,2,6},{0,7,6,4},{0,7,4,5},{0,7,5,1}};
-    static const int EV[6][2]   = {{0,1},{1,2},{2,0},{0,3},{1,3},{2,3}};
-    static const int TRI[16][7] = {
-        {-1,-1,-1,-1,-1,-1,-1},{0,2,3,-1,-1,-1,-1},{0,1,4,-1,-1,-1,-1},{3,2,1,3,1,4,-1},
-        {1,2,5,-1,-1,-1,-1},   {0,1,5,0,5,3,-1},   {0,2,5,0,5,4,-1},   {3,4,5,-1,-1,-1,-1},
-        {3,4,5,-1,-1,-1,-1},   {0,2,5,0,5,4,-1},   {0,1,5,0,5,3,-1},   {1,2,5,-1,-1,-1,-1},
-        {3,2,1,3,1,4,-1},      {0,1,4,-1,-1,-1,-1},{0,2,3,-1,-1,-1,-1},{-1,-1,-1,-1,-1,-1,-1}
-    };
-    const float x0=-1.02f,x1=1.02f, y0=-0.72f,y1=0.80f, z0=-1.05f,z1=1.12f;
-    const int NX=58, NY=44, NZ=64;                     // celulas por eixo (resolucao)
-    const float dx=(x1-x0)/NX, dy=(y1-y0)/NY, dz=(z1-z0)/NZ;
-
-    // pre-calcula a funcao nos cantos do grid (reaproveitado por 8 celulas)
-    std::vector<float> G((NX+1)*(NY+1)*(NZ+1));
-    auto GI=[&](int i,int j,int k){ return (i*(NY+1)+j)*(NZ+1)+k; };
-    for (int i=0;i<=NX;i++) for (int j=0;j<=NY;j++) for (int k=0;k<=NZ;k++)
-        G[GI(i,j,k)] = mapaSapo(x0+i*dx, y0+j*dy, z0+k*dz);
-
-    std::vector<float> buf;                            // x,y,z, nx,ny,nz, r,g,b por vertice
-    buf.reserve(200000);
-    const float ex=0.01f;
-    for (int i=0;i<NX;i++) for (int j=0;j<NY;j++) for (int k=0;k<NZ;k++) {
-        Vec3 cp[8]; float cv[8];
-        for (int c=0;c<8;c++){
-            int ox=c&1, oy=(c>>1)&1, oz=(c>>2)&1;
-            cp[c] = { x0+(i+ox)*dx, y0+(j+oy)*dy, z0+(k+oz)*dz };
-            cv[c] = G[GI(i+ox,j+oy,k+oz)];
-        }
-        for (int t=0;t<6;t++){
-            const int* T=TETS[t];
-            Vec3 P[4]; float V[4];
-            for (int m=0;m<4;m++){ P[m]=cp[T[m]]; V[m]=cv[T[m]]; }
-            int idx = (V[0]<0?1:0)|(V[1]<0?2:0)|(V[2]<0?4:0)|(V[3]<0?8:0);
-            for (int e=0; TRI[idx][e]>=0; e+=3){
-                for (int w=0;w<3;w++){
-                    int ed=TRI[idx][e+w], a=EV[ed][0], b=EV[ed][1];
-                    float tt = V[a]/(V[a]-V[b]);       // onde a funcao cruza 0
-                    Vec3 p = { P[a].x+(P[b].x-P[a].x)*tt,
-                               P[a].y+(P[b].y-P[a].y)*tt,
-                               P[a].z+(P[b].z-P[a].z)*tt };
-                    // normal = gradiente da funcao (aponta pra fora) -> shading liso
-                    Vec3 n = vnorm({ mapaSapo(p.x+ex,p.y,p.z)-mapaSapo(p.x-ex,p.y,p.z),
-                                     mapaSapo(p.x,p.y+ex,p.z)-mapaSapo(p.x,p.y-ex,p.z),
-                                     mapaSapo(p.x,p.y,p.z+ex)-mapaSapo(p.x,p.y,p.z-ex) });
-                    Vec3 col = corSapoPorAltura(p.y);
-                    float v9[9]={p.x,p.y,p.z, n.x,n.y,n.z, col.x,col.y,col.z};
-                    buf.insert(buf.end(), v9, v9+9);
-                }
-            }
-        }
-    }
-
+// Fallback do sapo: so e usado se sapo.obj faltar (corpo + cabeca em elipsoides).
+void geraMalhaSapo() {
     listaSapo = glGenLists(1);
     glNewList(listaSapo, GL_COMPILE);
-      glBegin(GL_TRIANGLES);
-      for (size_t o=0; o<buf.size(); o+=9){
-          glColor3f (buf[o+6],buf[o+7],buf[o+8]);
-          glNormal3f(buf[o+3],buf[o+4],buf[o+5]);
-          glVertex3f(buf[o+0],buf[o+1],buf[o+2]);
-      }
-      glEnd();
+      glColor3f(VERDE_SAPO[0], VERDE_SAPO[1], VERDE_SAPO[2]);
+      blob(0, 0.02f, -0.03f, 0.60f, 0.40f, 0.66f, 1.0f);   // tronco
+      blob(0, 0.07f,  0.56f, 0.44f, 0.39f, 0.42f, 1.0f);   // cabeca
     glEndList();
-    printf("Sapo gerado: %zu triangulos.\n", buf.size()/27);
 }
 
-// Transformacao do sapo no mundo (posicao + giro + squash/rolagem). Extraida
-// para ser reusada tanto no desenho normal quanto no passe de CONTORNO.
+// Transformacao do sapo no mundo (posicao + giro + squash/rolagem).
 void transformaSapo() {
     float fase = tempo * 10.0f;
     float bob  = fabsf(sinf(fase)) * 0.10f;
@@ -816,16 +681,13 @@ void desenhaSapo() {
     glPushMatrix();
       transformaSapo();
 
-      // ---- CORPO: UMA malha lisa e continua (metaballs ou .obj), sem "bolhas".
-      // As normais/cores ja estao na display list. Culling off: as normais vem
-      // do gradiente (corretas pra fora), entao nao dependemos da orientacao.
-      brilhoMaterial(0.30f, 20);               // pele umida com brilho suave
+      // ---- CORPO: a malha do .obj (normais/cores ja na display list) ----
+      brilhoMaterial(0.30f, 20);
       glDisable(GL_CULL_FACE);
       if (listaSapo) glCallList(listaSapo);
       glEnable(GL_CULL_FACE);
 
-      // ---- OLHOS: desenhados por cima (a malha gerada deixa so o "monte"; um
-      //      .obj profissional ja costuma trazer os olhos, entao pulamos). -----
+      // ---- OLHOS: so no fallback (o .obj ja traz os olhos) ----
       if (!sapoDeOBJ) {
         brilhoMaterial(0.9f, 80);              // olho bem molhado/brilhante
         for (int lado = -1; lado <= 1; lado += 2) {
@@ -863,7 +725,7 @@ void desenhaMosca(float x, float y, float z) {
       glTranslatef(x, y, z);
       glTranslatef(0, sinf(tempo * 6.0f) * 0.04f, 0);   // flutua de leve
 
-      // ---- MODELO .OBJ (se existir mosca.obj) -> gira devagar e some ----
+      // ---- MODELO .OBJ (moscas.obj) -> gira devagar ----
       if (moscaDeOBJ) {
         glRotatef(tempo * 60.0f, 0, 1, 0);       // giro lento p/ dar vida
         glDisable(GL_CULL_FACE);
@@ -1021,29 +883,16 @@ void desenhaMoita(float x, float z, float esc) {
 }
 
 // JUNCOS: talos finos verticais na beira da agua (escondem a costura da margem).
-void desenhaJuncos(float x, float z, int idx) {
-    glColor3f(0.30f, 0.52f, 0.22f);
-    for (int j = 0; j < 5; j++) {
-        float ox = (hashIdx(idx, j*7+1) - 0.25f) * 0.9f;
-        float oz = (hashIdx(idx, j*7+2) - 0.25f) * 0.9f;
-        float h  = 0.5f + hashIdx(idx, j*7+3) * 0.7f;
-        glPushMatrix();
-          glTranslatef(x + ox, -0.12f, z + oz);
-          glRotatef((hashIdx(idx,j)-0.25f)*40.0f, 0, 0, 1);
-          caixa(0.06f, h, 0.06f, false);
-        glPopMatrix();
-    }
-}
-
 bool usoShader() { return shadersOK && usarShader; }
 
 void desenhaCenario() {
-    // Rolagem da textura TRAVADA na velocidade real do mundo: a textura repete
-    // 40x ao longo de 125 unidades de comprimento ((Z_MORTE+10)-(Z_SPAWN-20)),
-    // entao avancar distancia*(40/125) cola cada "texel" no ponto do mundo ->
-    // grama/ponte andam EXATAMENTE como as arvores e obstaculos (1:1). Antes
-    // estava "no olho" e a grama deslizava em relacao as arvores.
-    float rolagem = distancia * (40.0f / 125.0f);
+    // Rolagem da textura TRAVADA na velocidade real do mundo (mesmo sentido das
+    // arvores/obstaculos). Modulo = 40/125: a textura repete 40x ao longo de 125
+    // unidades ((Z_MORTE+10)-(Z_SPAWN-20)), entao esse passo cola cada "texel" no
+    // ponto do mundo (1:1). SINAL NEGATIVO: com 'rolagem' crescente a textura
+    // fluiria pro horizonte (contra as arvores); negativa faz o solo vir NA
+    // direcao da camera, junto com as arvores.
+    float rolagem = -distancia * (40.0f / 125.0f);
     glDisable(GL_CULL_FACE);             // planos de uma face so
     glColor3f(1, 1, 1);
 
@@ -1217,38 +1066,144 @@ void texto(float x, float y, const char* s, void* fonte) {
     glRasterPos2f(x, y);
     for (const char* c = s; *c; c++) glutBitmapCharacter(fonte, *c);
 }
-
-void desenhaHUD() {
-    glDisable(GL_LIGHTING);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_FOG);
+// largura em pixels de um texto bitmap (p/ centralizar)
+int larguraTexto(const char* s, void* fonte) {
+    return glutBitmapLength(fonte, (const unsigned char*)s);
+}
+// texto centralizado em torno de cx
+void textoCentro(float cx, float y, const char* s, void* fonte) {
+    texto(cx - larguraTexto(s, fonte) * 0.5f, y, s, fonte);
+}
+// entra/sai do modo 2D (projecao ortografica na tela) guardando o estado 3D
+void inicio2D() {
+    glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST); glDisable(GL_FOG);
     glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
     gluOrtho2D(0, larguraTela, 0, alturaTela);
     glMatrixMode(GL_MODELVIEW);  glPushMatrix(); glLoadIdentity();
-
-    char buf[128];
-    glColor3f(1, 1, 1);
-    sprintf(buf, "Moscas: %d", pontos);
-    texto(20, alturaTela - 34, buf, GLUT_BITMAP_HELVETICA_18);
-    sprintf(buf, "Distancia: %d m", (int)distancia);
-    texto(20, alturaTela - 60, buf, GLUT_BITMAP_HELVETICA_18);
-    sprintf(buf, "Velocidade: %.0f", velocidade);
-    texto(20, alturaTela - 86, buf, GLUT_BITMAP_HELVETICA_18);
-
-    if (gameover) {
-        glColor3f(1, 0.3f, 0.3f);
-        texto(larguraTela/2 - 90, alturaTela/2 + 20, "GAME OVER", GLUT_BITMAP_TIMES_ROMAN_24);
-        glColor3f(1, 1, 1);
-        texto(larguraTela/2 - 150, alturaTela/2 - 15,
-              "Pressione R para jogar de novo", GLUT_BITMAP_HELVETICA_18);
-    }
-
+}
+void fim2D() {
     glPopMatrix();
     glMatrixMode(GL_PROJECTION); glPopMatrix();
     glMatrixMode(GL_MODELVIEW);
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_LIGHTING);
-    glEnable(GL_FOG);
+    glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING); glEnable(GL_FOG);
+}
+void retangulo(float x, float y, float w, float h) {
+    glBegin(GL_QUADS);
+      glVertex2f(x, y); glVertex2f(x+w, y); glVertex2f(x+w, y+h); glVertex2f(x, y+h);
+    glEnd();
+}
+
+// ---- FONTE VETORIAL (stroke) estilo GAMER: escalavel e com traco grosso ----
+// As fontes bitmap do GLUT sao minusculas e fixas. As STROKE sao vetoriais:
+// da pra escalar pra qualquer tamanho e engrossar o traco (glLineWidth).
+// Usamos GLUT_STROKE_MONO_ROMAN (monoespacada -> cara de arcade / placar).
+static const float STROKE_H = 119.05f;   // altura nominal de uma stroke font
+void textoStroke(float cx, float y, float altura, float grossura,
+                 const char* s, void* fonte) {
+    float sc = altura / STROKE_H;
+    float w  = glutStrokeLength(fonte, (const unsigned char*)s) * sc;
+    glEnable(GL_LINE_SMOOTH);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glLineWidth(grossura);
+    glPushMatrix();
+      glTranslatef(cx - w * 0.5f, y, 0);   // centralizado horizontalmente
+      glScalef(sc, sc, sc);
+      for (const char* c = s; *c; c++) glutStrokeCharacter(fonte, *c);
+    glPopMatrix();
+    glLineWidth(1.0f);
+    glDisable(GL_LINE_SMOOTH);
+}
+
+// HUD DE JOGO: score centralizado no topo + BARRA DE FOME no rodape.
+void desenhaHUD() {
+    inicio2D();
+    float cx = larguraTela * 0.5f;
+    char buf[128];
+
+    // ---- SCORE centralizado (moscas + distancia) ----
+    glColor3f(1, 1, 1);
+    sprintf(buf, "%d m", (int)distancia);
+    textoCentro(cx, alturaTela - 46, buf, GLUT_BITMAP_TIMES_ROMAN_24);
+    sprintf(buf, "%d moscas", pontos);
+    textoCentro(cx, alturaTela - 74, buf, GLUT_BITMAP_HELVETICA_18);
+
+    // ---- BARRA DE FOME (rodape, centralizada): verde->amarelo->vermelho ----
+    float bw = 420, bh = 24, bx = cx - bw*0.5f, by = 30;
+    float ff = fome < 0 ? 0 : (fome > 1 ? 1 : fome);
+    glColor3f(0.10f, 0.09f, 0.07f); retangulo(bx-3, by-3, bw+6, bh+6);   // moldura
+    glColor3f(0.26f, 0.22f, 0.18f); retangulo(bx, by, bw, bh);          // fundo
+    float cr = (ff < 0.5f) ? 1.0f : 2.0f*(1.0f-ff);                     // gradiente de cor
+    float cg = (ff > 0.5f) ? 1.0f : 2.0f*ff;
+    glColor3f(cr, cg, 0.16f);        retangulo(bx, by, bw*ff, bh);      // preenchimento
+    glColor3f(1, 1, 1);
+    textoCentro(cx, by + bh + 8, "FOME  (coma moscas!)", GLUT_BITMAP_HELVETICA_12);
+
+    fim2D();
+}
+
+// TELA DE MENU (overlay 2D): titulo, entrada de nome e melhores scores.
+void desenhaMenu() {
+    inicio2D();
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    float cx = larguraTela * 0.5f;
+    char buf[160];
+    void* MONO = GLUT_STROKE_MONO_ROMAN;
+
+    // ---- TITULO com sombra (destaque "gamer") ----
+    glColor4f(0.20f, 0.06f, 0.0f, 0.6f);
+    textoStroke(cx + 4, alturaTela - 104, 64, 5.5f, "SAPO SURFISTA", MONO);
+    glColor3f(1.0f, 0.86f, 0.42f);
+    textoStroke(cx,     alturaTela - 100, 64, 4.5f, "SAPO SURFISTA", MONO);
+
+    // ---- CAIXA DO NOME ----
+    glColor4f(0, 0, 0, 0.4f); retangulo(cx - 265, alturaTela - 190, 530, 48);
+    glColor3f(1, 1, 1);
+    sprintf(buf, "NOME: %s_", nomeJogador.c_str());
+    textoStroke(cx, alturaTela - 180, 30, 3.0f, buf, MONO);
+    glColor3f(0.95f, 0.9f, 0.78f);
+    textoStroke(cx, alturaTela - 220, 17, 1.6f, "DIGITE O NOME E TECLE ENTER", MONO);
+
+    // ---- PLACAR (painel translucido p/ legibilidade sobre o sapo) ----
+    float py1 = 28, py2 = 250;
+    glColor4f(0, 0, 0, 0.45f); retangulo(cx - 335, py1, 670, py2 - py1);
+    glColor3f(1.0f, 0.85f, 0.40f);
+    textoStroke(cx, py2 - 42, 30, 3.5f, "- MELHORES -", MONO);
+    glColor3f(1, 1, 1);
+    if (placar.empty()) {
+        textoStroke(cx, py2 - 105, 22, 2.0f, "AINDA SEM RECORDES", MONO);
+    } else {
+        float y = py2 - 92;
+        for (size_t i = 0; i < placar.size() && i < 5; i++) {
+            sprintf(buf, "%d. %-12s %5d m", (int)i+1, placar[i].nome.c_str(), placar[i].dist);
+            textoStroke(cx, y, 22, 2.2f, buf, MONO);
+            y -= 32;
+        }
+    }
+    glDisable(GL_BLEND);
+    fim2D();
+}
+
+// TELA DE GAME OVER (overlay 2D).
+void desenhaGameOver() {
+    inicio2D();
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0, 0, 0, 0.55f); retangulo(0, 0, larguraTela, alturaTela);
+    float cx = larguraTela * 0.5f, cy = alturaTela * 0.5f;
+    char buf[128];
+    void* MONO = GLUT_STROKE_MONO_ROMAN;
+
+    glColor4f(0.25f, 0.0f, 0.0f, 0.7f); textoStroke(cx + 4, cy + 56, 72, 7.0f, "GAME OVER", MONO);
+    glColor3f(1.0f, 0.40f, 0.34f);      textoStroke(cx,     cy + 60, 72, 5.5f, "GAME OVER", MONO);
+
+    glColor3f(1, 1, 1);
+    sprintf(buf, "%d M", (int)distancia);
+    textoStroke(cx, cy - 8, 48, 4.0f, buf, MONO);
+    sprintf(buf, "%s  -  %d MOSCAS", nomeJogador.empty()?"SAPO":nomeJogador.c_str(), pontos);
+    textoStroke(cx, cy - 52, 22, 2.0f, buf, MONO);
+    glColor3f(0.95f, 0.88f, 0.7f);
+    textoStroke(cx, cy - 100, 24, 2.2f, "ENTER PARA O MENU", MONO);
+    glDisable(GL_BLEND);
+    fim2D();
 }
 
 // ============================================================================
@@ -1316,16 +1271,86 @@ void desenhaCeu() {
 // troca de programa de shader com seguranca (nao faz nada se GLEW falhou)
 void prog(GLuint p) { if (shadersOK) glUseProgram(p); }
 
-// passe de CONTORNO: infla a geometria ao longo da normal, so as faces de tras,
-// pinta de preto -> forma a silhueta (a "linha" do desenho cartoon).
-void passeContorno() {
-    if (!usoShader()) return;
-    prog(progOutline);
-    glUniform1f(glGetUniformLocation(progOutline, "larg"), 0.03f);
-    glCullFace(GL_FRONT);
-    glPushMatrix(); transformaSapo(); if (listaSapo) glCallList(listaSapo); glPopMatrix();
-    for (auto& o : obstaculos) desenhaObstaculo(o);   // redesenha inflado em preto
-    glCullFace(GL_BACK);
+// ---- PLACAR: carrega/salva em placar.txt (nome moscas distancia por linha) ----
+bool scoreMaior(const Score& a, const Score& b) { return a.pts > b.pts; }
+// Mantem apenas O MELHOR resultado de cada NOME (sem repetidos), ordena e corta.
+void dedupPlacar() {
+    std::map<std::string, Score> melhor;
+    for (Score& s : placar) {
+        auto it = melhor.find(s.nome);
+        if (it == melhor.end() || s.pts > it->second.pts) melhor[s.nome] = s;
+    }
+    placar.clear();
+    for (auto& kv : melhor) placar.push_back(kv.second);
+    std::sort(placar.begin(), placar.end(), scoreMaior);
+    if (placar.size() > 10) placar.resize(10);
+}
+void salvaPlacar() {
+    FILE* f = fopen("placar.txt", "w"); if (!f) return;
+    for (Score& s : placar) fprintf(f, "%s %d %d\n", s.nome.c_str(), s.moscas, s.dist);
+    fclose(f);
+}
+void carregaPlacar() {
+    placar.clear();
+    FILE* f = fopen("placar.txt", "r"); if (!f) return;
+    char nome[64]; int mo, di;
+    while (fscanf(f, "%63s %d %d", nome, &mo, &di) == 3) {
+        Score s; s.nome = nome; s.moscas = mo; s.dist = di; s.pts = di;  // score = distancia
+        placar.push_back(s);
+    }
+    fclose(f);
+    dedupPlacar();          // limpa eventuais repetidos ja gravados
+    salvaPlacar();          // reescreve o arquivo ja limpo
+}
+void registraScore() {
+    Score s;
+    s.nome   = nomeJogador.empty() ? "SAPO" : nomeJogador;
+    s.moscas = pontos;
+    s.dist   = (int)distancia;
+    s.pts    = (int)distancia;          // SCORE = so a distancia (moscas so reabastecem)
+    placar.push_back(s);
+    dedupPlacar();          // guarda so o melhor de cada nome
+    salvaPlacar();
+}
+
+// ---- transicoes de estado ----
+void iniciaJogo() {                       // menu/gameover -> jogando (reseta tudo)
+    obstaculos.clear(); moscas.clear();
+    pista = 1; sapoX = 0; sapoY = 0; velY = 0;
+    pulando = rolando = false; lingua = 0;
+    velocidade = 14.0f; distancia = 0; pontos = 0; fome = 1.0f;
+    for (float z = -15; z >= Z_SPAWN; z -= ESPACO_LINHA) geraLinha(z);
+    distProxLinha = ESPACO_LINHA;
+    estado = JOGANDO;
+}
+void morrer() { registraScore(); estado = GAMEOVER; }
+void voltaMenu() {                        // gameover -> menu (cena limpa e estatica)
+    estado = MENU;
+    obstaculos.clear(); moscas.clear();
+    sapoX = 0; distancia = 0;
+}
+
+// SAPO DO MENU: de FRENTE para a camera, em cima da ponte, com respiracao leve.
+void desenhaSapoMenu() {
+    glPushMatrix();
+      float bob = fabsf(sinf(tempo * 3.0f)) * 0.06f;
+      glTranslatef(0.0f, 0.5f + bob, -0.5f);     // em cima da ponte, um pouco a frente
+      glScalef(1.2f, 1.2f, 1.2f);
+      // SEM o giro de 180 -> a cabeca (+Z do modelo) fica virada para a camera
+      brilhoMaterial(0.30f, 20);
+      glDisable(GL_CULL_FACE);
+      if (listaSapo) glCallList(listaSapo);
+      glEnable(GL_CULL_FACE);
+      if (!sapoDeOBJ) {                          // olhos p/ malha gerada (o .obj ja tem)
+        brilhoMaterial(0.9f, 80);
+        for (int lado = -1; lado <= 1; lado += 2) {
+          glColor3f(0.93f, 0.76f, 0.18f); blob(0.28f*lado, 0.33f, 0.55f, 1,1,1, 0.155f);
+          glColor3f(0.04f, 0.04f, 0.04f); blob(0.28f*lado, 0.40f, 0.49f, 1.5f,0.6f,1.0f, 0.085f);
+          glColor3f(1, 1, 1);             blob(0.31f*lado, 0.44f, 0.46f, 1,1,1, 0.032f);
+        }
+      }
+    glPopMatrix();
+    brilhoMaterial(1.0f, 40);
 }
 
 void display() {
@@ -1345,19 +1370,25 @@ void display() {
 
     desenhaCenario();                      // (deixa progToon ativo se shader on)
 
-    // sombra: pipeline fixo (preto translucido, sem iluminacao/shader)
-    prog(0);
-    desenhaSombraDoSapo();
-    if (usoShader()) { prog(progToon); enviaFog(progToon); glBindTexture(GL_TEXTURE_2D, texBranca); }
+    if (estado == MENU) {
+        // sapo de frente na ponte + overlay do menu
+        if (usoShader()) { prog(progToon); enviaFog(progToon); glBindTexture(GL_TEXTURE_2D, texBranca); }
+        desenhaSapoMenu();
+        prog(0);
+        desenhaMenu();
+    } else {
+        // JOGANDO ou GAMEOVER: cena de jogo (sombra + sapo + obstaculos + moscas)
+        prog(0);
+        desenhaSombraDoSapo();
+        if (usoShader()) { prog(progToon); enviaFog(progToon); glBindTexture(GL_TEXTURE_2D, texBranca); }
+        desenhaSapo();
+        for (auto& o : obstaculos) desenhaObstaculo(o);
+        for (auto& m : moscas)     desenhaMosca(POS_PISTA[m.pista], m.altura, m.z);
 
-    desenhaSapo();
-    for (auto& o : obstaculos) desenhaObstaculo(o);
-    for (auto& m : moscas)     desenhaMosca(POS_PISTA[m.pista], m.altura, m.z);
-
-    // (contorno preto removido: estilo minimalista flat/low-poly)
-
-    prog(0);
-    desenhaHUD();
+        prog(0);
+        desenhaHUD();
+        if (estado == GAMEOVER) desenhaGameOver();
+    }
     glutSwapBuffers();
 }
 
@@ -1379,10 +1410,10 @@ void geraLinha(float z) {
             obstaculos.push_back(o);
         }
     }
-    // uma trilha de moscas na pista livre (as "moedas" do jogo)
-    if ((rand() / (float)RAND_MAX) < 0.7f) {
-        int n = 2 + rand() % 3;
-        float h = (rand() % 2) ? 0.6f : 1.6f;   // as altas exigem pular
+    // moscas na pista livre (SO reabastecem a fome) -> poucas, esparsas
+    if ((rand() / (float)RAND_MAX) < 0.4f) {
+        int n = 1 + rand() % 2;                  // 1 ou 2 moscas
+        float h = (rand() % 2) ? 0.6f : 1.6f;    // as altas exigem pular
         for (int i = 0; i < n; i++) {
             Mosca m; m.pista = pistaLivre; m.altura = h; m.z = z - i * 1.6f;
             moscas.push_back(m);
@@ -1394,10 +1425,10 @@ void geraLinha(float z) {
 //  12) ATUALIZACAO (fisica + logica) - chamada pelo timer ~60x por segundo
 // ============================================================================
 void atualiza(float dt) {
-    if (gameover) return;
+    tempo += dt;                            // relogio sempre corre (anima menu/agua)
+    if (estado != JOGANDO) return;          // menu/gameover: sem fisica
 
-    tempo     += dt;
-    velocidade += 0.35f * dt;               // vai ficando mais rapido
+    velocidade += 0.22f * dt;               // acelera de forma mais SUAVE (era 0.35)
     float avanco = velocidade * dt;
     distancia += avanco;
 
@@ -1436,10 +1467,15 @@ void atualiza(float dt) {
         if (o.tipo == OBST_BAIXO)      bateu = (sapoY < ALTURA_LIVRE);  // tinha que pular
         else if (o.tipo == OBST_ALTO)  bateu = (!rolando);              // tinha que rolar
         else /* OBST_BLOCO */          bateu = true;                    // tinha que desviar
-        if (bateu) { gameover = true; return; }
+        if (bateu) { morrer(); return; }
     }
 
-    // --- COLISOES com moscas (comer!) ---
+    // --- FOME: cai com o tempo; se zerar, o sapo "morre de fome" ---
+    // a fome cai MAIS RAPIDO conforme o jogo acelera (proporcional a velocidade)
+    fome -= FOME_TAXA * (velocidade / 14.0f) * dt;
+    if (fome <= 0.0f) { fome = 0.0f; morrer(); return; }
+
+    // --- COLISOES com moscas (comer! -> reenche a fome) ---
     for (size_t i = 0; i < moscas.size(); ) {
         Mosca& m = moscas[i];
         float dx = sapoX - POS_PISTA[m.pista];
@@ -1448,6 +1484,7 @@ void atualiza(float dt) {
         if (dx*dx + dy*dy + dz*dz < 0.9f * 0.9f) {
             pontos++;
             lingua = 1.0f;                          // dispara a lingua (visual)
+            fome = fminf(1.0f, fome + FOME_GANHO);  // comer reenche a barra
             moscas.erase(moscas.begin() + i);
         } else i++;
     }
@@ -1487,39 +1524,52 @@ void reshape(int w, int h) {
 // ============================================================================
 //  14) ENTRADA (teclado)
 // ============================================================================
-void reinicia() {
-    obstaculos.clear(); moscas.clear();
-    pista = 1; sapoX = 0; sapoY = 0; velY = 0;
-    pulando = rolando = false; lingua = 0;
-    velocidade = 14.0f; distancia = 0; pontos = 0; gameover = false;
-    for (float z = -15; z >= Z_SPAWN; z -= ESPACO_LINHA) geraLinha(z);  // repovoa o mundo
-    distProxLinha = ESPACO_LINHA;
+void pular() {
+    if (pulando) return;                         // ja esta no ar
+    if (rolando) { rolando = false; tempoRola = 0; }  // CANCELA o rolamento e pula na hora
+    pulando = true; velY = FORCA_PULO;
 }
-
-void pular() { if (!pulando && !rolando) { pulando = true; velY = FORCA_PULO; } }
 void rolar() {
     // FAST-FALL: se estiver no ar, mergulha rapido pro chao (como nesses jogos)
     if (pulando) { if (velY > -FORCA_PULO*2.0f) velY = -FORCA_PULO*2.2f; return; }
-    if (!rolando) { rolando = true; tempoRola = 0.5f; }   // no chao: rola/abaixa
+    if (!rolando) { rolando = true; tempoRola = 0.4f; }   // no chao: rola/abaixa (mais curto)
 }
 
 void teclas(unsigned char k, int, int) {
+    // ---- MENU: digita o nome; ENTER comeca; ESC sai ----
+    if (estado == MENU) {
+        if (k == 13) { iniciaJogo(); return; }                        // ENTER
+        if (k == 8 || k == 127) { if (!nomeJogador.empty()) nomeJogador.erase(nomeJogador.size()-1); return; }
+        if (k == 27) { exit(0); }
+        if (nomeJogador.size() < 12 &&
+            ((k>='a'&&k<='z')||(k>='A'&&k<='Z')||(k>='0'&&k<='9')))
+            nomeJogador.push_back((char)toupper(k));
+        return;
+    }
+    // ---- GAME OVER: ENTER/R volta ao menu; ESC sai ----
+    if (estado == GAMEOVER) {
+        if (k == 13 || k=='r' || k=='R') voltaMenu();
+        else if (k == 27 || k=='q' || k=='Q') exit(0);
+        return;
+    }
+    // ---- JOGANDO ----
     switch (k) {
         case ' ': case 'w': case 'W': pular(); break;
         case 's': case 'S': rolar(); break;
         case 'a': case 'A': if (pista > 0) pista--; break;
         case 'd': case 'D': if (pista < 2) pista++; break;
-        case 'r': case 'R': reinicia(); break;
-        case 't': case 'T':                       // liga/desliga shaders cartoon
+        case 't': case 'T':                       // liga/desliga shaders
             usarShader = !usarShader;
             if (!shadersOK) printf("(shaders indisponiveis)\n");
-            else printf("Shaders: %s\n", usarShader ? "ON (cartoon)" : "OFF (classico)");
+            else printf("Shaders: %s\n", usarShader ? "ON" : "OFF (classico)");
             break;
-        case 27: case 'q': case 'Q': exit(0);
+        case 27: voltaMenu(); break;              // ESC -> volta ao menu
+        case 'q': case 'Q': exit(0);
     }
 }
 
 void teclasEspeciais(int k, int, int) {
+    if (estado != JOGANDO) return;
     switch (k) {
         case GLUT_KEY_LEFT:  if (pista > 0) pista--; break;
         case GLUT_KEY_RIGHT: if (pista < 2) pista++; break;
@@ -1540,10 +1590,8 @@ int main(int argc, char** argv) {
     glutCreateWindow("Sapo Surfista 3D");
 
     initGL();
-
-    // primeiras linhas do mundo (preenche da frente do sapo ate bem longe)
-    for (float z = -15; z >= Z_SPAWN; z -= ESPACO_LINHA) geraLinha(z);
-    distProxLinha = ESPACO_LINHA;   // proxima linha nasce apos andar 1 intervalo
+    carregaPlacar();                // le os recordes salvos (placar.txt)
+    estado = MENU;                  // comeca na tela de menu
 
     glutDisplayFunc(display);
     glutReshapeFunc(reshape);
@@ -1554,8 +1602,9 @@ int main(int argc, char** argv) {
     glutTimerFunc(16, timer, 0);
 
     printf("=== SAPO SURFISTA 3D ===\n");
+    printf("MENU: digite o nome e tecle ENTER para jogar.\n");
     printf("Setas: trocar pista | Cima/Espaco: pular | Baixo/S: rolar\n");
-    printf("R: reiniciar | ESC: sair\n");
+    printf("Coma moscas p/ nao zerar a FOME! | ESC: menu\n");
 
     glutMainLoop();
     return 0;
