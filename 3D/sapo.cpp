@@ -35,6 +35,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <algorithm>   // std::sort (recorte dos vaos no deck)
 
 // ----------------------------------------------------------------------------
 //  CONSTANTES DO MUNDO
@@ -93,7 +94,7 @@ float distProxLinha = 0.0f;      // distancia (m) em que a proxima linha sera cr
 // ----------------------------------------------------------------------------
 //  IDs das TEXTURAS (geradas por codigo em criaTexturas())  [REQ:TEXTURA]
 // ----------------------------------------------------------------------------
-GLuint texMadeira, texAgua, texCaixa;
+GLuint texMadeira, texAgua, texCaixa, texGrama;
 GLuint texBranca = 0;         // textura 1x1 branca (p/ objetos SEM textura no shader)
 
 // ---- SHADERS (toon / contorno / agua) ----
@@ -171,10 +172,10 @@ void pixelAgua(int x, int y, unsigned char* p) {
     float w  = sinf(x * 0.10f) * cosf(y * 0.11f);
     float w2 = sinf((x + y) * 0.055f);
     float t  = 0.5f + 0.34f * w + 0.16f * w2;
-    float br = (t > 0.82f) ? 0.25f : 0.0f;             // faixinhas de brilho
-    p[0] = (unsigned char)fminf(255, 28  + 55  * t + 150 * br);
-    p[1] = (unsigned char)fminf(255, 120 + 75  * t + 150 * br);
-    p[2] = (unsigned char)fminf(255, 180 + 55  * t + 120 * br);
+    float br = (t > 0.82f) ? 1.0f : 0.0f;              // faisca DOURADA do sol
+    p[0] = (unsigned char)fminf(255,  18 + 42  * t + 190 * br);  // R baixo (agua) + ouro no brilho
+    p[1] = (unsigned char)fminf(255,  95 + 70  * t + 140 * br);
+    p[2] = (unsigned char)fminf(255, 120 + 55  * t +  55 * br);
 }
 
 // ENGRADADO CARTOON: moldura escura grossa + tabuas em cruz + grao leve.
@@ -191,10 +192,21 @@ void pixelCaixa(int x, int y, unsigned char* p) {
     p[2] = (unsigned char)fminf(255,  88 * b);
 }
 
+// GRAMA CARTOON: verde com manchas de tom (relva) + pontinhos claros/escuros.
+void pixelGrama(int x, int y, unsigned char* p) {
+    float n  = ruido(x, y) * 0.5f + ruido(x/3, y/3) * 0.5f;   // relva em 2 escalas
+    float t  = 0.80f + 0.20f * n;
+    float tuft = (ruido(x/2, y/2) > 0.75f) ? 0.18f : 0.0f;    // tufos mais claros
+    p[0] = (unsigned char)fminf(255,  70 * t + 25*tuft);
+    p[1] = (unsigned char)fminf(255, 150 * t + 55*tuft);
+    p[2] = (unsigned char)fminf(255,  60 * t + 20*tuft);
+}
+
 void criaTexturas() {
     texMadeira = fazTextura(128, pixelMadeira);
     texAgua    = fazTextura(128, pixelAgua);
     texCaixa   = fazTextura(128, pixelCaixa);
+    texGrama   = fazTextura(128, pixelGrama);
     // textura 1x1 branca: objetos sem textura (sapo, obstaculos) amostram ela
     // no shader e a cor final vira apenas a cor do vertice.
     unsigned char branco[3] = { 255, 255, 255 };
@@ -244,7 +256,7 @@ static const char* FS_TOON =
 "  vec3 base = gl_Color.rgb * t.rgb;\n"
 "  vec3 col = base * (0.30 + 0.70*band) + spec;\n"           // ambiente + difusa + brilho
 "  float rim = pow(1.0 - max(dot(n,V),0.0), 3.0);\n"         // luz de contorno (rim)
-"  col += rim * 0.16 * vec3(0.85,1.0,0.9);\n"
+"  col += rim * 0.18 * vec3(1.0,0.82,0.55);\n"
 "  float dist = -P.z;\n"
 "  float f = clamp((fogEnd - dist)/(fogEnd - fogStart), 0.0, 1.0);\n"
 "  col = mix(fogColor, col, f);\n"
@@ -267,11 +279,11 @@ static const char* FS_OUT =
 static const char* VS_AGUA =
 "#version 120\n"
 "uniform float tempo;\n"
-"varying vec3 N; varying vec3 P; varying float H;\n"
+"varying vec3 N; varying vec3 P; varying float H; varying float WX;\n"
 "void main(){\n"
 "  vec4 v = gl_Vertex;\n"
 "  float w = sin(v.x*0.6 + tempo*1.5)*0.08 + cos(v.z*0.5 + tempo*1.1)*0.08;\n"
-"  v.y += w; H = w;\n"
+"  v.y += w; H = w; WX = v.x;\n"
 "  float dx =  0.6*cos(v.x*0.6 + tempo*1.5)*0.08;\n"
 "  float dz = -0.5*sin(v.z*0.5 + tempo*1.1)*0.08;\n"
 "  vec3 nn = normalize(vec3(-dx, 1.0, -dz));\n"
@@ -281,19 +293,23 @@ static const char* VS_AGUA =
 "}\n";
 static const char* FS_AGUA =
 "#version 120\n"
-"varying vec3 N; varying vec3 P; varying float H;\n"
-"uniform vec3 fogColor; uniform float fogStart, fogEnd;\n"
+"varying vec3 N; varying vec3 P; varying float H; varying float WX;\n"
+"uniform vec3 fogColor; uniform float fogStart, fogEnd; uniform float tempo;\n"
 "void main(){\n"
 "  vec3 n = normalize(N);\n"
 "  vec3 L = normalize(gl_LightSource[0].position.xyz - P);\n"
 "  vec3 V = normalize(-P);\n"
 "  vec3 Hh = normalize(L+V);\n"
 "  float sp = pow(max(dot(n,Hh),0.0), 80.0);\n"
-"  vec3 deep = vec3(0.09,0.34,0.55);\n"
-"  vec3 shallow = vec3(0.28,0.62,0.82);\n"
+"  vec3 deep    = vec3(0.04,0.19,0.28);\n"                  // agua funda: petroleo
+"  vec3 shallow = vec3(0.10,0.42,0.50);\n"                  // crista: turquesa
 "  vec3 col = mix(deep, shallow, clamp(H*3.0+0.5, 0.0, 1.0));\n"
-"  if (sp > 0.55) col += vec3(0.85,0.92,1.0);\n"            // faisca do sol (toon)
 "  float dist = -P.z;\n"
+   // REFLEXO DO SOL: agua ganha brilho dourado cintilante perto do horizonte
+"  float horiz = clamp((dist-30.0)/40.0, 0.0, 1.0);\n"
+"  float shim = 0.5 + 0.5*sin(WX*2.5 + dist*0.6 - tempo*3.0);\n"
+"  col += vec3(1.0,0.72,0.40) * horiz*horiz * 0.55 * shim;\n"
+"  if (sp > 0.55) col += vec3(1.0,0.90,0.70);\n"            // faisca especular quente
 "  float f = clamp((fogEnd - dist)/(fogEnd - fogStart), 0.0, 1.0);\n"
 "  col = mix(fogColor, col, f);\n"
 "  gl_FragColor = vec4(col, 1.0);\n"
@@ -341,16 +357,16 @@ void initShaders() {
 
 // passa fog (mesmos valores da nevoa fixa) para um programa
 void enviaFog(GLuint prog) {
-    glUniform3f(glGetUniformLocation(prog,"fogColor"), 0.74f,0.85f,0.93f);
-    glUniform1f(glGetUniformLocation(prog,"fogStart"), 28.0f);
-    glUniform1f(glGetUniformLocation(prog,"fogEnd"),   80.0f);
+    glUniform3f(glGetUniformLocation(prog,"fogColor"), 0.99f,0.78f,0.60f);
+    glUniform1f(glGetUniformLocation(prog,"fogStart"), 34.0f);
+    glUniform1f(glGetUniformLocation(prog,"fogEnd"),   92.0f);
 }
 
 // ============================================================================
 //  2) INICIALIZACAO DO OPENGL
 // ============================================================================
 // Cor do horizonte/neblina: a agua e o ceu fundem nesta cor la longe.
-static const GLfloat COR_NEVOA[4] = { 0.74f, 0.85f, 0.93f, 1.0f };
+static const GLfloat COR_NEVOA[4] = { 0.99f, 0.78f, 0.60f, 1.0f };
 
 void initGL() {
     // GLEW carrega as funcoes de shader. Se falhar, seguimos sem shaders.
@@ -366,8 +382,8 @@ void initGL() {
     glEnable(GL_FOG);
     glFogfv(GL_FOG_COLOR, COR_NEVOA);
     glFogi(GL_FOG_MODE, GL_LINEAR);
-    glFogf(GL_FOG_START, 28.0f);
-    glFogf(GL_FOG_END,   80.0f);
+    glFogf(GL_FOG_START, 34.0f);
+    glFogf(GL_FOG_END,   92.0f);
     glHint(GL_FOG_HINT, GL_NICEST);
 
     // Suaviza as bordas serrilhadas das linhas/pontos (o multisample da janela
@@ -390,9 +406,9 @@ void initGL() {
     // Modelo de iluminacao de Phong do OpenGL fixo, com uma fonte (o "sol").
     glEnable(GL_LIGHTING);
     glEnable(GL_LIGHT0);
-    GLfloat luzAmbiente[]  = { 0.35f, 0.35f, 0.40f, 1.0f }; // luz de preenchimento
-    GLfloat luzDifusa[]    = { 0.9f,  0.9f,  0.85f, 1.0f }; // a "cor" do sol
-    GLfloat luzEspecular[] = { 1.0f,  1.0f,  1.0f,  1.0f }; // brilho
+    GLfloat luzAmbiente[]  = { 0.42f, 0.34f, 0.38f, 1.0f }; // fill quente/rosado (por do sol)
+    GLfloat luzDifusa[]    = { 1.05f, 0.82f, 0.55f, 1.0f }; // sol DOURADO quente
+    GLfloat luzEspecular[] = { 1.0f,  0.92f, 0.75f, 1.0f }; // brilho ambar
     glLightfv(GL_LIGHT0, GL_AMBIENT,  luzAmbiente);
     glLightfv(GL_LIGHT0, GL_DIFFUSE,  luzDifusa);
     glLightfv(GL_LIGHT0, GL_SPECULAR, luzEspecular);
@@ -869,27 +885,14 @@ void desenhaObstaculo(const Obstaculo& o) {
     glPushMatrix();
       glTranslatef(POS_PISTA[o.pista], 0.0f, o.z);
       if (o.tipo == OBST_BAIXO) {
-        // ---- BURACO NA PONTE (pule por cima, ou desvie de pista) ----
-        float w = 1.8f, l = 1.6f;
-        glDisable(GL_CULL_FACE);
-        glBegin(GL_QUADS);
-          glNormal3f(0, 1, 0);
-          glColor3f(0.02f, 0.03f, 0.04f);                     // sombra/borda do vao
-          glVertex3f(-w/2-0.08f,0.015f,-l/2-0.08f); glVertex3f(w/2+0.08f,0.015f,-l/2-0.08f);
-          glVertex3f( w/2+0.08f,0.015f, l/2+0.08f); glVertex3f(-w/2-0.08f,0.015f, l/2+0.08f);
-          glColor3f(0.06f, 0.17f, 0.22f);                     // agua escura no fundo
-          glVertex3f(-w/2,0.03f,-l/2); glVertex3f(w/2,0.03f,-l/2);
-          glVertex3f( w/2,0.03f, l/2); glVertex3f(-w/2,0.03f, l/2);
-          glColor3f(0.12f, 0.30f, 0.38f);                     // reflexinho da agua
-          glVertex3f(-w/2+0.2f,0.032f,-0.15f); glVertex3f(w/2-0.6f,0.032f,-0.15f);
-          glVertex3f( w/2-0.6f,0.032f, 0.15f); glVertex3f(-w/2+0.2f,0.032f, 0.15f);
-        glEnd();
-        glEnable(GL_CULL_FACE);
-        // tabuas QUEBRADAS nas beiradas (madeira lascada)
-        glColor3f(0.38f, 0.26f, 0.15f);
-        for (int s=-1;s<=1;s+=2) {
-          glPushMatrix(); glTranslatef(0.42f*s,0,  l*0.45f); glRotatef(-16.0f,1,0,0); caixa(0.42f,0.12f,0.3f,false); glPopMatrix();
-          glPushMatrix(); glTranslatef(0.42f*s,0, -l*0.45f); glRotatef( 16.0f,1,0,0); caixa(0.42f,0.12f,0.3f,false); glPopMatrix();
+        // ---- VAO NA PONTE (pule por cima, ou desvie de pista) ----
+        //   O deck ja foi RECORTADO neste trecho (ver desenhaCenario), entao a
+        //   agua do rio aparece por baixo de verdade. Aqui so caprichamos nas
+        //   TABUAS QUEBRADAS/lascadas nas beiras do buraco.
+        glColor3f(0.42f, 0.29f, 0.16f);
+        for (int s = -1; s <= 1; s += 2) {
+          glPushMatrix(); glTranslatef(0.75f*s, 0,  1.0f); glRotatef(-24.0f,1,0,0); caixa(0.55f,0.10f,0.30f,false); glPopMatrix();
+          glPushMatrix(); glTranslatef(0.75f*s, 0, -1.0f); glRotatef( 24.0f,1,0,0); caixa(0.55f,0.10f,0.30f,false); glPopMatrix();
         }
       } else if (o.tipo == OBST_BLOCO) {
         // ---- PEDRA / rocha (desvie de pista) ----
@@ -950,6 +953,83 @@ void planoTex(float x0, float x1, float zNear, float zFar, float y,
     glEnd();
 }
 
+// Face lateral VERTICAL de uma tabua do pier (do topo y=0 ate yBot, dentro da
+// agua). Subdividida em Z p/ a luz/nevoa interpolarem e a textura ROLAR junto
+// com o mundo -> o pier ganha ESPESSURA visivel (antes parecia um decalque).
+void paredePier(float x, float zNear, float zFar, float yTop, float yBot,
+                float nx_, float rolagem, float repZ, int nz) {
+    glNormal3f(nx_, 0, 0);
+    glBegin(GL_QUAD_STRIP);
+    for (int i = 0; i <= nz; i++) {
+        float t = i / (float)nz;
+        float z = zFar + (zNear - zFar) * t;
+        float v = rolagem + repZ * t;
+        glTexCoord2f(0.0f, v); glVertex3f(x, yTop, z);
+        glTexCoord2f(0.6f, v); glVertex3f(x, yBot, z);
+    }
+    glEnd();
+}
+
+// Uma ESTACA (pilar) de madeira que afunda na agua, sob a beira do pier.
+void estacaPier(float x, float z) {
+    glPushMatrix();
+      glTranslatef(x, -1.7f, z);
+      caixa(0.22f, 1.7f, 0.22f, false);   // vai de y=-1.7 (na agua) ate y=0 (deck)
+    glPopMatrix();
+}
+
+// pseudo-random ESTAVEL por indice (0..1) -> variar arvores sem "piscar" ao rolar
+static float hashIdx(int i, int sal) {
+    int n = i * 73856093 ^ sal * 19349663;
+    n = (n << 13) ^ n;
+    return ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0f * 0.5f;
+}
+
+// ARVORE cartoon: tronco marrom + copa em 2-3 bolhas verdes (reusa listaEsfera).
+void desenhaArvore(float x, float z, float esc, float tom) {
+    glPushMatrix();
+      glTranslatef(x, -0.08f, z);
+      glScalef(esc, esc, esc);
+      // tronco
+      glColor3f(0.42f, 0.28f, 0.16f);
+      glPushMatrix(); glTranslatef(0, 0.0f, 0); caixa(0.26f, 1.1f, 0.26f, false); glPopMatrix();
+      // copa (verde variando por 'tom')
+      glColor3f(0.24f*tom, 0.52f*tom, 0.26f*tom);
+      blob(0.0f, 1.55f, 0.0f, 1.15f, 1.05f, 1.15f, 0.62f);
+      glColor3f(0.30f*tom, 0.60f*tom, 0.30f*tom);
+      blob(-0.34f, 1.30f, 0.20f, 0.85f, 0.85f, 0.85f, 0.5f);
+      blob( 0.38f, 1.38f,-0.15f, 0.9f, 0.9f, 0.9f, 0.52f);
+    glPopMatrix();
+}
+
+// MOITA / arbusto: um aglomerado baixo de bolhas verdes.
+void desenhaMoita(float x, float z, float esc) {
+    glPushMatrix();
+      glTranslatef(x, -0.12f, z);
+      glScalef(esc, esc, esc);
+      glColor3f(0.26f, 0.50f, 0.24f);
+      blob( 0.0f, 0.18f, 0.0f, 1.3f, 0.9f, 1.2f, 0.34f);
+      glColor3f(0.32f, 0.58f, 0.28f);
+      blob(-0.24f, 0.12f, 0.12f, 0.9f, 0.8f, 0.9f, 0.26f);
+      blob( 0.22f, 0.14f,-0.10f, 0.95f, 0.85f, 0.9f, 0.28f);
+    glPopMatrix();
+}
+
+// JUNCOS: talos finos verticais na beira da agua (escondem a costura da margem).
+void desenhaJuncos(float x, float z, int idx) {
+    glColor3f(0.30f, 0.52f, 0.22f);
+    for (int j = 0; j < 5; j++) {
+        float ox = (hashIdx(idx, j*7+1) - 0.25f) * 0.9f;
+        float oz = (hashIdx(idx, j*7+2) - 0.25f) * 0.9f;
+        float h  = 0.5f + hashIdx(idx, j*7+3) * 0.7f;
+        glPushMatrix();
+          glTranslatef(x + ox, -0.12f, z + oz);
+          glRotatef((hashIdx(idx,j)-0.25f)*40.0f, 0, 0, 1);
+          caixa(0.06f, h, 0.06f, false);
+        glPopMatrix();
+    }
+}
+
 bool usoShader() { return shadersOK && usarShader; }
 
 void desenhaCenario() {
@@ -970,15 +1050,103 @@ void desenhaCenario() {
         planoTex(-40, 40, Z_MORTE + 10, Z_SPAWN - 20, -0.2f, 16, 40, rolagem, 16, 50);
     }
 
-    // ---- PIER: 3 tabuas ----
+    // ---- MARGENS (grama): transformam a lagoa num RIO com duas margens ----
     if (usoShader()) { glUseProgram(progToon); enviaFog(progToon); }
     else               glEnable(GL_TEXTURE_2D);
     glColor3f(1, 1, 1);
+    glBindTexture(GL_TEXTURE_2D, texGrama);
+    planoTex(-40.0f, -7.0f, Z_MORTE + 10, Z_SPAWN - 20, -0.10f, 10, 40, rolagem*0.6f, 12, 60);
+    planoTex(  7.0f, 40.0f, Z_MORTE + 10, Z_SPAWN - 20, -0.10f, 10, 40, rolagem*0.6f, 12, 60);
+
+    // ---- PONTE: um DECK UNICO e continuo (as 3 pistas viram UMA ponte so, sem
+    //   vao entre elas). Os buracos sao RECORTADOS de verdade: nao desenhamos o
+    //   deck no trecho do vao -> a agua do rio aparece por baixo. ----
+    const float zN = Z_MORTE + 10.0f, zF = Z_SPAWN - 20.0f;   // extensao do deck em Z
+    const float XB0 = -3.6f, XB1 = 3.6f;                       // bordas da ponte
+    const float BX[4] = { XB0, -1.2f, 1.2f, XB1 };             // 3 faixas ADJACENTES
+    const float repZtot = 40.0f, repXtot = 6.0f;               // textura continua
+    const float HL = 1.0f;                                     // meia-largura do vao (Z)
+    auto vOfZ = [&](float z){ return rolagem + repZtot*(z - zF)/(zN - zF); };
+    auto uOfX = [&](float x){ return repXtot*(x - XB0)/(XB1 - XB0); };
+
+    // pedaco SOLIDO do topo do deck [x0,x1]x[za,zb], subdividido p/ luz/nevoa
+    auto deckTop = [&](float x0, float x1, float za, float zb){
+        int nz = (int)ceilf(fabsf(zb - za) / 1.6f); if (nz < 1) nz = 1;
+        glNormal3f(0, 1, 0);
+        for (int i = 0; i < nz; i++) {
+            float z0 = za + (zb - za) * (i / (float)nz);
+            float z1 = za + (zb - za) * ((i+1) / (float)nz);
+            float v0 = vOfZ(z0), v1 = vOfZ(z1);
+            glBegin(GL_QUADS);
+              glTexCoord2f(uOfX(x0), v0); glVertex3f(x0, 0.0f, z0);
+              glTexCoord2f(uOfX(x1), v0); glVertex3f(x1, 0.0f, z0);
+              glTexCoord2f(uOfX(x1), v1); glVertex3f(x1, 0.0f, z1);
+              glTexCoord2f(uOfX(x0), v1); glVertex3f(x0, 0.0f, z1);
+            glEnd();
+        }
+    };
+    // parede de CORTE do vao: mostra a espessura da madeira na borda do buraco
+    auto cutWall = [&](float x0, float x1, float z){
+        glColor3f(0.30f, 0.21f, 0.12f);
+        glNormal3f(0, 0, 1);
+        glBegin(GL_QUADS);
+          glTexCoord2f(uOfX(x0),0.0f); glVertex3f(x0,  0.0f, z);
+          glTexCoord2f(uOfX(x1),0.0f); glVertex3f(x1,  0.0f, z);
+          glTexCoord2f(uOfX(x1),0.5f); glVertex3f(x1, -0.20f, z);
+          glTexCoord2f(uOfX(x0),0.5f); glVertex3f(x0, -0.20f, z);
+        glEnd();
+        glColor3f(1,1,1);
+    };
+
     glBindTexture(GL_TEXTURE_2D, texMadeira);
-    for (int p = 0; p < 3; p++) {
-        float cx = POS_PISTA[p];
-        planoTex(cx - LARG_PISTA/2, cx + LARG_PISTA/2,
-                 Z_MORTE + 10, Z_SPAWN - 20, 0.0f, 1, 40, rolagem, 2, 70);
+    for (int bnd = 0; bnd < 3; bnd++) {
+        float x0 = BX[bnd], x1 = BX[bnd+1];
+        // vaos (buracos) desta faixa, ordenados de longe -> perto
+        std::vector<std::pair<float,float> > vaos;
+        for (auto& o : obstaculos)
+            if (o.tipo == OBST_BAIXO && o.pista == bnd)
+                vaos.push_back(std::make_pair(o.z - HL, o.z + HL));
+        std::sort(vaos.begin(), vaos.end());
+        // varre de zF (longe) ate zN (perto), desenhando o solido e PULANDO o vao
+        float cursor = zF;
+        for (auto& g : vaos) {
+            float g0 = fmaxf(g.first, zF), g1 = fminf(g.second, zN);
+            if (g1 <= cursor) continue;                     // fora do range / ja coberto
+            if (g0 > cursor) deckTop(x0, x1, cursor, g0);   // trecho solido antes do vao
+            cutWall(x0, x1, fmaxf(g0, cursor));             // borda de corte (longe)
+            cutWall(x0, x1, g1);                            // borda de corte (perto)
+            cursor = g1;
+        }
+        if (cursor < zN) deckTop(x0, x1, cursor, zN);
+    }
+    // ESPESSURA nas bordas EXTERNAS da ponte (desce ate dentro da agua)
+    glColor3f(0.66f, 0.62f, 0.58f);
+    paredePier(XB0, zN, zF, 0.0f, -0.42f, -1.0f, rolagem, 40, 70);
+    paredePier(XB1, zN, zF, 0.0f, -0.42f,  1.0f, rolagem, 40, 70);
+    glColor3f(1, 1, 1);
+
+    // ---- ESTACAS sob as beiras externas (rolam junto com o mundo) ----
+    glBindTexture(GL_TEXTURE_2D, texBranca);
+    glColor3f(0.34f, 0.24f, 0.15f);
+    float espac = 7.0f, fase = fmodf(distancia, espac);
+    for (float z = Z_SPAWN + fase; z < Z_MORTE; z += espac) {
+        estacaPier(XB0, z);
+        estacaPier(XB1, z);
+    }
+    glColor3f(1, 1, 1);
+
+    // ---- VEGETACAO nas margens: arvores, moitas e juncos (variados e rolando) ----
+    float espV = 6.0f, faseV = fmodf(distancia, espV);
+    for (float z = Z_SPAWN + faseV; z < Z_MORTE; z += espV) {
+        int idx = (int)floorf((z - distancia) / espV + 0.5f);  // rotulo ESTAVEL do item
+        for (int lado = -1; lado <= 1; lado += 2) {
+            float baseX = lado * (9.0f + hashIdx(idx, lado*3) * 12.0f);   // 9..21 do centro
+            float esc   = 0.8f + hashIdx(idx, lado*5) * 0.9f;
+            float tom   = 0.85f + hashIdx(idx, lado*9) * 0.4f;
+            if (hashIdx(idx, lado) < 0.66f) desenhaArvore(baseX, z, esc, tom);
+            else                            desenhaMoita(baseX + lado*0.6f, z, esc*1.1f);
+            desenhaJuncos(lado * (7.3f + hashIdx(idx, lado*11)*0.5f), z + 1.5f, idx*4 + lado);
+        }
     }
     // deixa a textura BRANCA ligada -> objetos coloridos (sapo/obstaculos) ok no shader
     glBindTexture(GL_TEXTURE_2D, texBranca);
@@ -1075,12 +1243,47 @@ void desenhaCeu() {
     glDisable(GL_FOG);        glDisable(GL_CULL_FACE);
     glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); gluOrtho2D(0,1,0,1);
     glMatrixMode(GL_MODELVIEW);  glPushMatrix(); glLoadIdentity();
-    glBegin(GL_QUADS);
-      glColor3f(0.26f, 0.50f, 0.78f);                         // topo: azul ceu
-      glVertex2f(0,1); glVertex2f(1,1);
-      glColor3f(COR_NEVOA[0], COR_NEVOA[1], COR_NEVOA[2]);    // base: cor da nevoa
-      glVertex2f(1,0); glVertex2f(0,0);
+    // ---- GRADIENTE DE POR DO SOL (horizonte y=0 -> topo y=1) ----
+    // Varias faixas -> transicao suave pessego -> rosa -> laranja -> ember.
+    const int NS = 5;
+    static const float SKY[NS][4] = {
+        {0.00f, 0.99f, 0.78f, 0.60f},   // horizonte: pessego (= COR_NEVOA, funde na agua)
+        {0.24f, 1.00f, 0.70f, 0.50f},   // apricot
+        {0.50f, 0.98f, 0.54f, 0.50f},   // rosa
+        {0.76f, 0.96f, 0.48f, 0.34f},   // laranja
+        {1.00f, 0.82f, 0.40f, 0.30f},   // ember (topo)
+    };
+    glBegin(GL_QUAD_STRIP);
+    for (int i = 0; i < NS; i++) {
+        glColor3f(SKY[i][1], SKY[i][2], SKY[i][3]);
+        glVertex2f(0.0f, SKY[i][0]); glVertex2f(1.0f, SKY[i][0]);
+    }
     glEnd();
+
+    // ---- SOL: disco dourado + halo, logo acima do horizonte ----
+    // asp mantem o sol REDONDO (o ortho 0..1 distorce com a razao da janela).
+    const float solX = 0.5f, solY = 0.40f;
+    float asp = (float)alturaTela / (larguraTela ? larguraTela : 1);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);              // additivo -> brilho que soma
+    for (int r = 0; r < 3; r++) {                   // halo em 3 aneis suaves
+        float rad = 0.11f + r * 0.07f;
+        float a   = 0.17f - r * 0.05f;
+        glBegin(GL_TRIANGLE_FAN);
+          glColor4f(1.0f, 0.80f, 0.45f, a);   glVertex2f(solX, solY);
+          glColor4f(1.0f, 0.80f, 0.45f, 0.0f);
+          for (int k = 0; k <= 40; k++) { float a2 = k / 40.0f * 2.0f * PI;
+              glVertex2f(solX + cosf(a2)*rad*asp, solY + sinf(a2)*rad); }
+        glEnd();
+    }
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBegin(GL_TRIANGLE_FAN);                        // core do sol (disco solido)
+      glColor4f(1.0f, 0.95f, 0.78f, 1.0f); glVertex2f(solX, solY);
+      glColor4f(1.0f, 0.86f, 0.58f, 1.0f);
+      for (int k = 0; k <= 48; k++) { float a2 = k / 48.0f * 2.0f * PI;
+          glVertex2f(solX + cosf(a2)*0.075f*asp, solY + sinf(a2)*0.075f); }
+    glEnd();
+    glDisable(GL_BLEND);
     glColor3f(1,1,1);
     glPopMatrix();
     glMatrixMode(GL_PROJECTION); glPopMatrix();
