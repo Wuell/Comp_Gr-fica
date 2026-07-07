@@ -112,10 +112,19 @@ GLuint listaEsferaLo = 0;   // esfera de BAIXA resolucao p/ pecas pequenas (mosc
 // de um arquivo .obj (modelo profissional) OU ser gerada por marching tetrahedra.
 GLuint listaSapo = 0;
 bool   sapoDeOBJ = false;    // true se carregou de sapo.obj (senao, malha gerada)
+GLuint listaMosca = 0;       // modelo .obj da mosca (opcional)
+bool   moscaDeOBJ = false;   // true se carregou mosca.obj (senao, mosca procedural)
+
+// AJUSTES do modelo do SAPO importado (mexa aqui se ele nascer torto/afundado):
+static const float SAPO_OBJ_GIRA_Y = -90.0f; // graus em Y p/ alinhar a "frente"
+static const float SAPO_OBJ_PISO   = -0.42f; // altura dos "pes" no modelo local
+static const float SAPO_OBJ_TAM    =  1.7f;  // tamanho no maior eixo
 
 // Forward-declarations (initGL, la embaixo, precisa chamar estas antes da
 // definicao delas mais adiante no arquivo):
-bool carregaOBJ(const char* caminho);   // loader de .obj (secao 4a)
+// carregaOBJ agora e GENERICO: le qualquer .obj e RETORNA uma display list
+// (0 = falhou). Parametros orientam/escalam o modelo (sapo, mosca, etc.).
+GLuint carregaOBJ(const char* caminho, float giraY, float piso, float tam);
 void geraMalhaSapo();                    // gerador por metaballs (secao 4b)
 
 // ============================================================================
@@ -237,7 +246,8 @@ static const char* VS_TOON =
 "  gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
 "}\n";
 
-// --- FRAGMENT toon: difusa QUANTIZADA em faixas + brilho em degrau + nevoa
+// --- FRAGMENT (estilo FLAT / low-poly limpo): difusa SUAVE (sem faixas duras),
+//     cor solida chapada, sem brilho de plastico, sem rim. So a forma + nevoa.
 static const char* FS_TOON =
 "#version 120\n"
 "varying vec3 N; varying vec3 P;\n"
@@ -247,16 +257,10 @@ static const char* FS_TOON =
 "  vec3 n = normalize(N);\n"
 "  vec3 L = normalize(gl_LightSource[0].position.xyz - P);\n"
 "  float d = max(dot(n,L), 0.0);\n"
-"  float band = d>0.66 ? 1.0 : (d>0.30 ? 0.72 : 0.5);\n"     // 3 faixas de luz (cel)
-"  vec3 V = normalize(-P);\n"
-"  vec3 H = normalize(L+V);\n"
-"  float sp = pow(max(dot(n,H),0.0), 48.0);\n"
-"  float spec = sp > 0.5 ? 0.5 : 0.0;\n"                     // brilho em degrau
+"  float lit = 0.62 + 0.38*d;\n"                             // sombreado SUAVE e claro
 "  vec4 t = texture2D(tex, gl_TexCoord[0].st);\n"
 "  vec3 base = gl_Color.rgb * t.rgb;\n"
-"  vec3 col = base * (0.30 + 0.70*band) + spec;\n"           // ambiente + difusa + brilho
-"  float rim = pow(1.0 - max(dot(n,V),0.0), 3.0);\n"         // luz de contorno (rim)
-"  col += rim * 0.18 * vec3(1.0,0.82,0.55);\n"
+"  vec3 col = base * lit;\n"                                 // cor solida, chapada
 "  float dist = -P.z;\n"
 "  float f = clamp((fogEnd - dist)/(fogEnd - fogStart), 0.0, 1.0);\n"
 "  col = mix(fogColor, col, f);\n"
@@ -449,8 +453,16 @@ void initGL() {
 
     // Corpo do sapo: tenta um modelo .obj externo; se nao houver, gera a malha
     // lisa por metaballs. Nos dois casos vira UMA display list (listaSapo).
-    if (carregaOBJ("sapo.obj")) { sapoDeOBJ = true; printf("Sapo: modelo sapo.obj carregado.\n"); }
-    else                        { geraMalhaSapo();  printf("Sapo: malha gerada por metaballs (sem sapo.obj).\n"); }
+    listaSapo = carregaOBJ("sapo.obj", SAPO_OBJ_GIRA_Y, SAPO_OBJ_PISO, SAPO_OBJ_TAM);
+    if (listaSapo) { sapoDeOBJ = true; printf("Sapo: modelo sapo.obj carregado.\n"); }
+    else           { geraMalhaSapo(); printf("Sapo: malha gerada por metaballs (sem sapo.obj).\n"); }
+
+    // Mosca: se existir mosca.obj na pasta, usa o modelo; senao, a mosca procedural.
+    // (giraY=0, base no y=0, tamanho pequeno ~0.35 no maior eixo)
+    listaMosca = carregaOBJ("mosca.obj", 0.0f, 0.0f, 0.35f);
+    moscaDeOBJ = (listaMosca != 0);
+    printf(moscaDeOBJ ? "Mosca: modelo mosca.obj carregado.\n"
+                      : "Mosca: procedural (sem mosca.obj).\n");
 
     initShaders();               // compila os shaders cartoon (ALEM do PDF)
     srand((unsigned)time(NULL));
@@ -563,11 +575,6 @@ static Vec3 corSapoPorAltura(float y){
 //     -> Baixe um sapo .obj (Poly Pizza etc.), salve como "sapo.obj" na pasta.
 // ============================================================================
 
-// AJUSTES do modelo importado (mexa aqui se ele nascer torto/afundado):
-static const float SAPO_OBJ_GIRA_Y = -90.0f; // graus em Y p/ alinhar a "frente"
-static const float SAPO_OBJ_PISO   = -0.42f; // altura dos "pes" no modelo local
-static const float SAPO_OBJ_TAM    =  1.7f;  // tamanho no maior eixo
-
 static Vec3 rotYv(Vec3 p, float deg){
     float a=deg*PI/180.0f, c=cosf(a), s=sinf(a);
     return { p.x*c + p.z*s, p.y, -p.x*s + p.z*c };
@@ -590,9 +597,9 @@ static void carregaMTL(const char* fn, std::map<std::string,Vec3>& mats){
     fclose(f);
 }
 
-bool carregaOBJ(const char* caminho) {
+GLuint carregaOBJ(const char* caminho, float giraY, float piso, float tam) {
     FILE* fp = fopen(caminho, "r");
-    if (!fp) return false;
+    if (!fp) return 0;
     std::vector<Vec3> vs, ns;
     struct Tri { int v[3]; int n[3]; Vec3 col; };
     std::vector<Tri> tris;
@@ -635,13 +642,13 @@ bool carregaOBJ(const char* caminho) {
         }
     }
     fclose(fp);
-    if (vs.empty() || tris.empty()) return false;
+    if (vs.empty() || tris.empty()) return 0;
 
     // 1) normaliza ORIENTACAO (gira em Y) nos vertices e nas normais
-    for (Vec3& p : vs) p = rotYv(p, SAPO_OBJ_GIRA_Y);
-    for (Vec3& p : ns) p = rotYv(p, SAPO_OBJ_GIRA_Y);
+    for (Vec3& p : vs) p = rotYv(p, giraY);
+    for (Vec3& p : ns) p = rotYv(p, giraY);
 
-    // 2) centraliza em X/Z, escala uniforme, e apoia os pes em SAPO_OBJ_PISO
+    // 2) centraliza em X/Z, escala uniforme, e apoia a base em 'piso'
     Vec3 mn=vs[0], mx=vs[0];
     for (Vec3& p : vs) {
         mn.x=fminf(mn.x,p.x); mn.y=fminf(mn.y,p.y); mn.z=fminf(mn.z,p.z);
@@ -649,15 +656,15 @@ bool carregaOBJ(const char* caminho) {
     }
     float cx=(mn.x+mx.x)*0.5f, cz=(mn.z+mx.z)*0.5f;
     float ext = fmaxf(mx.x-mn.x, fmaxf(mx.y-mn.y, mx.z-mn.z));
-    float esc = SAPO_OBJ_TAM / (ext>1e-6f ? ext : 1.0f);
+    float esc = tam / (ext>1e-6f ? ext : 1.0f);
     for (Vec3& p : vs) {
         p.x = (p.x-cx)*esc;
-        p.y = (p.y-mn.y)*esc + SAPO_OBJ_PISO;   // min y -> piso
+        p.y = (p.y-mn.y)*esc + piso;   // min y -> piso
         p.z = (p.z-cz)*esc;
     }
 
-    listaSapo = glGenLists(1);
-    glNewList(listaSapo, GL_COMPILE);
+    GLuint lista = glGenLists(1);
+    glNewList(lista, GL_COMPILE);
       glBegin(GL_TRIANGLES);
       for (Tri& t : tris) {
           Vec3 fn = vnorm(vcross(vsub(vs[t.v[1]],vs[t.v[0]]), vsub(vs[t.v[2]],vs[t.v[0]])));
@@ -670,7 +677,7 @@ bool carregaOBJ(const char* caminho) {
       }
       glEnd();
     glEndList();
-    return true;
+    return lista;
 }
 
 // ============================================================================
@@ -856,6 +863,16 @@ void desenhaMosca(float x, float y, float z) {
       glTranslatef(x, y, z);
       glTranslatef(0, sinf(tempo * 6.0f) * 0.04f, 0);   // flutua de leve
 
+      // ---- MODELO .OBJ (se existir mosca.obj) -> gira devagar e some ----
+      if (moscaDeOBJ) {
+        glRotatef(tempo * 60.0f, 0, 1, 0);       // giro lento p/ dar vida
+        glDisable(GL_CULL_FACE);
+        glCallList(listaMosca);
+        glEnable(GL_CULL_FACE);
+        glPopMatrix();
+        return;
+      }
+
       // ---- CORPO: uma "gotinha" escura (minimalista) ----
       glColor3f(0.12f, 0.12f, 0.15f);
       blobLo(0, 0, 0, 1.0f, 1.0f, 1.35f, 0.12f);
@@ -895,29 +912,18 @@ void desenhaObstaculo(const Obstaculo& o) {
           glPushMatrix(); glTranslatef(0.75f*s, 0, -1.0f); glRotatef( 24.0f,1,0,0); caixa(0.55f,0.10f,0.30f,false); glPopMatrix();
         }
       } else if (o.tipo == OBST_BLOCO) {
-        // ---- PEDRA / rocha (desvie de pista) ----
-        glColor3f(0.50f, 0.50f, 0.53f);
-        blob( 0.00f, 0.55f,  0.00f, 1.5f, 1.15f, 1.35f, 0.58f);   // corpo da pedra
-        blob( 0.34f, 1.15f,  0.12f, 1.0f, 0.95f, 0.95f, 0.46f);   // saliencia de cima
-        glColor3f(0.42f, 0.42f, 0.46f);                            // pedra mais escura
-        blob(-0.38f, 0.42f, -0.12f, 0.95f, 0.85f, 0.95f, 0.42f);
-        glColor3f(0.30f, 0.55f, 0.26f);                            // MUSGO no topo
-        blob( 0.10f, 1.45f,  0.05f, 1.3f, 0.32f, 1.15f, 0.34f);
-        blob(-0.30f, 1.02f,  0.30f, 0.8f, 0.30f, 0.8f, 0.28f);
-      } else { // OBST_ALTO -> TRONCO atravessado (role por baixo)
-        // dois suportes (tocos de madeira)
-        glColor3f(0.40f, 0.28f, 0.16f);
-        glPushMatrix(); glTranslatef(-0.95f, 0, 0); caixa(0.34f, 0.95f, 0.34f, false); glPopMatrix();
-        glPushMatrix(); glTranslatef( 0.95f, 0, 0); caixa(0.34f, 0.95f, 0.34f, false); glPopMatrix();
-        // TRONCO horizontal (elipsoide alongado em X) com casca marrom
-        glColor3f(0.46f, 0.31f, 0.18f);
-        blob(0, 1.18f, 0, 4.2f, 1.0f, 1.0f, 0.28f);
-        glColor3f(0.34f, 0.22f, 0.12f);                           // toras das pontas (mais escuro)
-        blob(-1.15f, 1.18f, 0, 0.6f, 1.1f, 1.1f, 0.28f);
-        blob( 1.15f, 1.18f, 0, 0.6f, 1.1f, 1.1f, 0.28f);
-        glColor3f(0.30f, 0.55f, 0.26f);                           // MUSGO por cima do tronco
-        blob(-0.3f, 1.42f, 0, 1.4f, 0.4f, 1.0f, 0.16f);
-        blob( 0.5f, 1.42f, 0, 1.1f, 0.4f, 1.0f, 0.15f);
+        // ---- PEDRA (desvie de pista) - minimalista: 2 seixos lisos, sem musgo ----
+        glColor3f(0.56f, 0.56f, 0.60f);
+        blob( 0.00f, 0.58f, 0.00f, 1.5f, 1.15f, 1.3f, 0.56f);    // seixo grande
+        glColor3f(0.47f, 0.47f, 0.51f);
+        blob( 0.22f, 1.12f, 0.08f, 0.9f, 0.72f, 0.85f, 0.44f);   // seixo menor por cima
+      } else { // OBST_ALTO -> BARREIRA de madeira (role por baixo)
+        // ---- minimalista: 2 postes limpos + 1 barra reta (sem toras/musgo) ----
+        glColor3f(0.44f, 0.31f, 0.20f);
+        glPushMatrix(); glTranslatef(-1.05f, 0, 0); caixa(0.16f, 1.12f, 0.16f, false); glPopMatrix();
+        glPushMatrix(); glTranslatef( 1.05f, 0, 0); caixa(0.16f, 1.12f, 0.16f, false); glPopMatrix();
+        glColor3f(0.52f, 0.37f, 0.24f);
+        glPushMatrix(); glTranslatef(0, 1.12f, 0); caixa(2.5f, 0.24f, 0.24f, false); glPopMatrix();
       }
     glPopMatrix();
 }
@@ -990,15 +996,14 @@ void desenhaArvore(float x, float z, float esc, float tom) {
     glPushMatrix();
       glTranslatef(x, -0.08f, z);
       glScalef(esc, esc, esc);
-      // tronco
-      glColor3f(0.42f, 0.28f, 0.16f);
-      glPushMatrix(); glTranslatef(0, 0.0f, 0); caixa(0.26f, 1.1f, 0.26f, false); glPopMatrix();
-      // copa (verde variando por 'tom')
-      glColor3f(0.24f*tom, 0.52f*tom, 0.26f*tom);
-      blob(0.0f, 1.55f, 0.0f, 1.15f, 1.05f, 1.15f, 0.62f);
-      glColor3f(0.30f*tom, 0.60f*tom, 0.30f*tom);
-      blob(-0.34f, 1.30f, 0.20f, 0.85f, 0.85f, 0.85f, 0.5f);
-      blob( 0.38f, 1.38f,-0.15f, 0.9f, 0.9f, 0.9f, 0.52f);
+      // tronco ALTO e fino (arvore de dossel amazonico)
+      glColor3f(0.38f, 0.27f, 0.18f);
+      glPushMatrix(); glTranslatef(0, 0.0f, 0); caixa(0.22f, 2.3f, 0.22f, false); glPopMatrix();
+      // copa: 2 bolhas verdes bem no ALTO (dossel), forma limpa/minimalista
+      glColor3f(0.19f*tom, 0.45f*tom, 0.23f*tom);
+      blob(0.0f, 2.8f, 0.0f, 1.55f, 1.35f, 1.55f, 0.72f);
+      glColor3f(0.24f*tom, 0.53f*tom, 0.27f*tom);
+      blob(0.18f, 3.25f, -0.12f, 1.0f, 1.0f, 1.0f, 0.55f);
     glPopMatrix();
 }
 
@@ -1033,7 +1038,12 @@ void desenhaJuncos(float x, float z, int idx) {
 bool usoShader() { return shadersOK && usarShader; }
 
 void desenhaCenario() {
-    float rolagem = distancia * 0.35f;   // desloca a textura conforme corremos
+    // Rolagem da textura TRAVADA na velocidade real do mundo: a textura repete
+    // 40x ao longo de 125 unidades de comprimento ((Z_MORTE+10)-(Z_SPAWN-20)),
+    // entao avancar distancia*(40/125) cola cada "texel" no ponto do mundo ->
+    // grama/ponte andam EXATAMENTE como as arvores e obstaculos (1:1). Antes
+    // estava "no olho" e a grama deslizava em relacao as arvores.
+    float rolagem = distancia * (40.0f / 125.0f);
     glDisable(GL_CULL_FACE);             // planos de uma face so
     glColor3f(1, 1, 1);
 
@@ -1055,8 +1065,8 @@ void desenhaCenario() {
     else               glEnable(GL_TEXTURE_2D);
     glColor3f(1, 1, 1);
     glBindTexture(GL_TEXTURE_2D, texGrama);
-    planoTex(-40.0f, -7.0f, Z_MORTE + 10, Z_SPAWN - 20, -0.10f, 10, 40, rolagem*0.6f, 12, 60);
-    planoTex(  7.0f, 40.0f, Z_MORTE + 10, Z_SPAWN - 20, -0.10f, 10, 40, rolagem*0.6f, 12, 60);
+    planoTex(-40.0f, -7.0f, Z_MORTE + 10, Z_SPAWN - 20, -0.10f, 10, 40, rolagem, 12, 60);
+    planoTex(  7.0f, 40.0f, Z_MORTE + 10, Z_SPAWN - 20, -0.10f, 10, 40, rolagem, 12, 60);
 
     // ---- PONTE: um DECK UNICO e continuo (as 3 pistas viram UMA ponte so, sem
     //   vao entre elas). Os buracos sao RECORTADOS de verdade: nao desenhamos o
@@ -1136,16 +1146,24 @@ void desenhaCenario() {
     glColor3f(1, 1, 1);
 
     // ---- VEGETACAO nas margens: arvores, moitas e juncos (variados e rolando) ----
-    float espV = 6.0f, faseV = fmodf(distancia, espV);
+    // Selva DENSA: espacamento curto + 2 camadas de arvore por lado (perto/fundo)
+    // -> as margens "fecham" como floresta amazonica, mas as copas sao altas e o
+    // meio (a ponte) continua livre e legivel.
+    float espV = 3.6f, faseV = fmodf(distancia, espV);
     for (float z = Z_SPAWN + faseV; z < Z_MORTE; z += espV) {
         int idx = (int)floorf((z - distancia) / espV + 0.5f);  // rotulo ESTAVEL do item
         for (int lado = -1; lado <= 1; lado += 2) {
-            float baseX = lado * (9.0f + hashIdx(idx, lado*3) * 12.0f);   // 9..21 do centro
-            float esc   = 0.8f + hashIdx(idx, lado*5) * 0.9f;
-            float tom   = 0.85f + hashIdx(idx, lado*9) * 0.4f;
-            if (hashIdx(idx, lado) < 0.66f) desenhaArvore(baseX, z, esc, tom);
-            else                            desenhaMoita(baseX + lado*0.6f, z, esc*1.1f);
-            desenhaJuncos(lado * (7.3f + hashIdx(idx, lado*11)*0.5f), z + 1.5f, idx*4 + lado);
+            // arvore da FRENTE (encosta na margem, emoldura o rio)
+            float xF = lado * (6.8f + hashIdx(idx, lado*3) * 3.0f);
+            desenhaArvore(xF, z, 1.0f + hashIdx(idx, lado*5) * 0.7f,
+                                  0.85f + hashIdx(idx, lado*9) * 0.4f);
+            // arvore do FUNDO (mais longe e alta -> fecha o dossel ao fundo)
+            float xB = lado * (13.0f + hashIdx(idx, lado*7) * 9.0f);
+            desenhaArvore(xB, z + espV*0.5f, 1.3f + hashIdx(idx, lado*13) * 0.9f,
+                                  0.78f + hashIdx(idx, lado*17) * 0.35f);
+            // uma moita ocasional na beira da agua (esconde a costura da margem)
+            if (hashIdx(idx, lado*2) < 0.5f)
+                desenhaMoita(lado * (7.0f + hashIdx(idx, lado) * 1.2f), z + 1.0f, 1.0f);
         }
     }
     // deixa a textura BRANCA ligada -> objetos coloridos (sapo/obstaculos) ok no shader
@@ -1317,9 +1335,10 @@ void display() {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
-    // CAMERA em 3a pessoa: atras e acima do sapo, olhando pra frente (-Z).
-    gluLookAt(sapoX * 0.4f, 2.3f, 7.5f,     // olho: baixo e atras
-              sapoX * 0.2f, 1.3f, -14.0f,   // alvo: quase na altura do sapo
+    // CAMERA em 3a pessoa: mais ALTA e RECUADA -> vista aberta (menos apertada),
+    // mostrando a floresta que fecha as margens.
+    gluLookAt(sapoX * 0.4f, 3.0f, 9.0f,     // olho: mais alto e mais atras
+              sapoX * 0.2f, 1.1f, -16.0f,   // alvo: mais longe (abre o campo)
               0, 1, 0);
 
     glLightfv(GL_LIGHT0, GL_POSITION, posLuz);  // luz (agora em coords de olho)
@@ -1335,7 +1354,7 @@ void display() {
     for (auto& o : obstaculos) desenhaObstaculo(o);
     for (auto& m : moscas)     desenhaMosca(POS_PISTA[m.pista], m.altura, m.z);
 
-    passeContorno();                       // contorno cartoon (so no modo shader)
+    // (contorno preto removido: estilo minimalista flat/low-poly)
 
     prog(0);
     desenhaHUD();
@@ -1461,7 +1480,7 @@ void reshape(int w, int h) {
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     // PROJECAO PERSPECTIVA: da a sensacao 3D (objetos distantes ficam menores)
-    gluPerspective(55.0, (double)w / alturaTela, 0.1, 200.0);
+    gluPerspective(64.0, (double)w / alturaTela, 0.1, 200.0);
     glMatrixMode(GL_MODELVIEW);
 }
 

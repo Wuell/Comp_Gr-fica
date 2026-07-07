@@ -1,0 +1,10 @@
+Sapo Surfista 3D — versao Windows
+
+Como jogar:
+  1. Mantenha TODOS os arquivos desta pasta juntos (o .exe precisa das DLLs).
+  2. De dois cliques em sapo.exe.
+
+Controles: setas Esquerda/Direita mudam de pista, R reinicia apos Game Over.
+
+Requisitos: Windows 64-bit com drivers de video (OpenGL). As DLLs incluidas
+(freeglut, glew, runtime do g++) ja acompanham o pacote, nada mais a instalar.
